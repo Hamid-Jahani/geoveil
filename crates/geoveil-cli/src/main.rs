@@ -3,6 +3,7 @@
 mod cli;
 mod commands;
 mod daemon;
+mod leaks_cmd;
 mod lock;
 mod output;
 mod paths;
@@ -40,6 +41,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<commands::Exit> {
         Command::Restore => commands::restore(&ctx).await,
         Command::Status => commands::status(&ctx).await,
         Command::Run(args) => daemon::run(&ctx, args).await,
+        Command::Leaks(args) => leaks_cmd::leaks(&ctx, args).await,
     }
 }
 
