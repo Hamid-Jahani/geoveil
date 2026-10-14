@@ -6,6 +6,11 @@ mod daemon;
 mod lock;
 mod output;
 mod paths;
+// Only the Windows sign-out watcher sends stop requests outside tests.
+#[cfg_attr(not(windows), allow(dead_code))]
+mod session_end;
+#[cfg(windows)]
+mod shutdown_win;
 #[cfg(test)]
 mod testutil;
 
