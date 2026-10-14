@@ -1,7 +1,7 @@
 //! Starting `geoveil run` and opening the log folder.
 //!
 //! The command line is built by pure functions (tested); only
-//! [`spawn_daemon`] and [`open_folder`] touch the system.
+//! [`spawn_daemon`], [`request_stop`] and [`open_folder`] touch the system.
 
 use geoveil_ipc::DaemonOptions;
 use std::ffi::OsString;
@@ -54,7 +54,8 @@ pub fn open_log(log_dir: &Path) -> io::Result<(File, PathBuf)> {
 }
 
 /// Starts the daemon in the background with stdout and stderr appended to
-/// the log. On Windows no console window is shown.
+/// the log. On Windows no console window is shown, and the daemon gets its
+/// own console process group so [`request_stop`] can send it Ctrl-Break.
 pub fn spawn_daemon(cmd: &DaemonCommand, log_dir: &Path) -> io::Result<(Child, PathBuf)> {
     let (mut log, path) = open_log(log_dir)?;
     let shown: Vec<String> = cmd.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
@@ -67,10 +68,66 @@ pub fn spawn_daemon(cmd: &DaemonCommand, log_dir: &Path) -> io::Result<(Child, P
         use std::os::windows::process::CommandExt;
         /// `CREATE_NO_WINDOW`: run the console program without a window.
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
+        /// `CREATE_NEW_PROCESS_GROUP`: the child leads its own group.
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
     let child = command.spawn()?;
     Ok((child, path))
+}
+
+/// Asks a daemon started by [`spawn_daemon`] to stop the way Ctrl-C would,
+/// so it restores the original settings before exiting. Used on Quit when
+/// the daemon does not answer over IPC. Never kills it outright: a killed
+/// daemon would leave the spoofed settings in place.
+///
+/// - Unix: `SIGTERM` (sent with `kill`).
+/// - Windows: `CTRL_BREAK_EVENT` to the child's process group, after
+///   attaching to its hidden console (the tray has none of its own).
+pub fn request_stop(child: &Child) -> io::Result<()> {
+    request_stop_pid(child.id())
+}
+
+#[cfg(unix)]
+fn request_stop_pid(pid: u32) -> io::Result<()> {
+    let status = Command::new("kill")
+        .args(["-TERM", &pid.to_string()])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("kill -TERM {pid} failed ({status})")))
+    }
+}
+
+#[cfg(windows)]
+fn request_stop_pid(pid: u32) -> io::Result<()> {
+    use windows_sys::Win32::System::Console::{AttachConsole, FreeConsole, GenerateConsoleCtrlEvent, CTRL_BREAK_EVENT};
+    // SAFETY: plain Win32 calls without pointers. The tray (a GUI process)
+    // has no console, so FreeConsole first is a no-op that makes sure
+    // AttachConsole can succeed. CTRL_BREAK_EVENT goes to the process group
+    // `pid` only, which the tray is not part of.
+    unsafe {
+        FreeConsole();
+        if AttachConsole(pid) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let sent = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pid);
+        let err = io::Error::last_os_error();
+        FreeConsole();
+        if sent == 0 {
+            return Err(err);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn request_stop_pid(_pid: u32) -> io::Result<()> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "cannot signal processes on this platform"))
 }
 
 /// The file manager command that opens `dir`.
@@ -150,6 +207,16 @@ mod tests {
         assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
         assert!(dir.join("geoveil.log.1").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn request_stop_sends_sigterm() {
+        use std::os::unix::process::ExitStatusExt;
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        request_stop(&child).unwrap();
+        let status = child.wait().unwrap();
+        assert_eq!(status.signal(), Some(15), "{status:?}");
     }
 
     #[test]

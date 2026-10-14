@@ -25,6 +25,10 @@ tray-icon = { version = "0.26.1", default-features = false }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 
+# Ctrl-Break to a started daemon on Quit when it does not answer over IPC.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
 # Windows and macOS need a native event loop on the main thread.
 [target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
 tao = { version = "0.37.1", default-features = false }

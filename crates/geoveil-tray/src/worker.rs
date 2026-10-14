@@ -8,7 +8,10 @@
 //! - Runs menu commands (pause, resume, restore now) and reports failures as
 //!   a notice.
 //! - On Quit, stops a daemon the tray started (the daemon restores the
-//!   original settings, unless it runs `--sticky`) before the tray exits.
+//!   original settings, unless it runs `--sticky`) before the tray exits:
+//!   over IPC when it answers, else with a graceful stop signal to the
+//!   process (see [`launcher::request_stop`]).
+//! - Never starts a second daemon while the one it started is still alive.
 //!
 //! The daemon side is behind [`DaemonLink`], so the logic is tested with a
 //! fake.
@@ -78,6 +81,11 @@ pub trait DaemonLink: Send {
     fn spawned_exit(&mut self) -> Option<String>;
     /// Waits up to `timeout` for the daemon this link started to exit.
     fn wait_spawned(&mut self, timeout: Duration) -> impl Future<Output = bool> + Send;
+    /// Whether the daemon this link started is still running.
+    fn spawned_running(&mut self) -> bool;
+    /// Asks the daemon this link started to stop gracefully (it restores
+    /// first), without IPC. The error is a user-facing message.
+    fn stop_spawned(&mut self) -> Result<(), String>;
 }
 
 /// The worker state machine.
@@ -133,6 +141,14 @@ impl<L: DaemonLink> Worker<L> {
 
     fn start_daemon(&mut self) {
         self.spawn_attempted = true;
+        if self.link.spawned_running() {
+            // A second daemon would fail on the state lock, and the handle to
+            // the first one (needed to stop it on Quit) would be lost.
+            self.set_disconnected(Some(
+                "the daemon the tray started is still running but does not answer; see the log".into(),
+            ));
+            return;
+        }
         match self.link.spawn_daemon() {
             Ok(()) => {
                 self.spawned = true;
@@ -235,12 +251,24 @@ impl<L: DaemonLink> Worker<L> {
         if !self.spawned {
             return;
         }
-        if !self.link.is_connected() && self.link.connect().await.is_err() {
-            return;
-        }
-        if self.link.request(Command::Shutdown, STATUS_TIMEOUT).await.is_ok() {
+        let connected = self.link.is_connected() || self.link.connect().await.is_ok();
+        if connected && self.link.request(Command::Shutdown, STATUS_TIMEOUT).await.is_ok() {
             self.link.disconnect();
             self.link.wait_spawned(STOP_TIMEOUT).await;
+            return;
+        }
+        // No IPC (for example the daemon could not listen): ask the process
+        // itself, so it does not keep applying settings after the tray exits.
+        if !self.link.spawned_running() {
+            return;
+        }
+        match self.link.stop_spawned() {
+            Ok(()) => {
+                if !self.link.wait_spawned(STOP_TIMEOUT).await {
+                    tracing::warn!("the daemon the tray started did not stop within {STOP_TIMEOUT:?}; it keeps running");
+                }
+            }
+            Err(e) => tracing::warn!("{e}; the daemon the tray started keeps running, stop it with `geoveil restore`"),
         }
     }
 }
@@ -363,6 +391,15 @@ impl DaemonLink for IpcLink {
         }
         false
     }
+
+    fn spawned_running(&mut self) -> bool {
+        self.child.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)))
+    }
+
+    fn stop_spawned(&mut self) -> Result<(), String> {
+        let Some(child) = self.child.as_ref() else { return Ok(()) };
+        launcher::request_stop(child).map_err(|e| format!("cannot stop geoveil run (pid {}): {e}", child.id()))
+    }
 }
 
 #[cfg(test)]
@@ -384,6 +421,10 @@ mod tests {
         exit_message: Option<String>,
         requests: Vec<Command>,
         waited: bool,
+        /// A spawned daemon is alive.
+        running: bool,
+        stop_result: Option<Result<(), String>>,
+        stops: u32,
     }
 
     impl DaemonLink for FakeLink {
@@ -404,7 +445,9 @@ mod tests {
         }
         fn spawn_daemon(&mut self) -> Result<(), String> {
             self.spawned += 1;
-            self.spawn_result.clone().unwrap_or(Ok(()))
+            let r = self.spawn_result.clone().unwrap_or(Ok(()));
+            self.running = r.is_ok();
+            r
         }
         fn spawned_exit(&mut self) -> Option<String> {
             self.exit_message.take()
@@ -412,6 +455,13 @@ mod tests {
         async fn wait_spawned(&mut self, _t: Duration) -> bool {
             self.waited = true;
             true
+        }
+        fn spawned_running(&mut self) -> bool {
+            self.running
+        }
+        fn stop_spawned(&mut self) -> Result<(), String> {
+            self.stops += 1;
+            self.stop_result.clone().unwrap_or(Ok(()))
         }
     }
 
@@ -465,10 +515,26 @@ mod tests {
         assert_eq!(w.link.spawned, 1);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn no_second_daemon_while_the_first_is_alive() {
+        let mut w = worker(FakeLink::default());
+        w.poll().await;
+        tokio::time::advance(START_TIMEOUT + Duration::from_secs(1)).await;
+        w.poll().await;
+        assert_eq!(w.state().link, Link::Disconnected);
+        // The first child never listened but is still running.
+        assert!(!w.command(UiCommand::StartDaemon).await);
+        assert_eq!(w.link.spawned, 1, "no second spawn");
+        let s = w.state();
+        assert!(s.notice.unwrap().contains("still running"));
+        assert!(s.spawned, "Quit must still stop the first one");
+    }
+
     #[tokio::test]
     async fn daemon_that_exits_is_reported() {
         let mut w = worker(FakeLink::default());
         w.poll().await;
+        w.link.running = false;
         w.link.exit_message = Some("geoveil run stopped (exit code: 1)".into());
         w.poll().await;
         let s = w.state();
@@ -556,6 +622,32 @@ mod tests {
         assert!(w.command(UiCommand::Quit).await);
         assert_eq!(w.link.requests, [Command::Status, Command::Shutdown]);
         assert!(w.link.waited);
+        assert_eq!(w.link.stops, 0, "IPC worked, no signal needed");
+    }
+
+    #[tokio::test]
+    async fn quit_without_ipc_signals_the_started_daemon() {
+        // The started daemon runs but never listens (IPC disabled).
+        let mut w = worker(FakeLink::default());
+        w.poll().await;
+        assert!(w.command(UiCommand::Quit).await);
+        assert!(w.link.requests.is_empty());
+        assert_eq!(w.link.stops, 1);
+        assert!(w.link.waited);
+
+        // A daemon that already exited is left alone.
+        let mut w = worker(FakeLink::default());
+        w.poll().await;
+        w.link.running = false;
+        assert!(w.command(UiCommand::Quit).await);
+        assert_eq!(w.link.stops, 0);
+
+        // A failed signal does not block Quit.
+        let mut w = worker(FakeLink { stop_result: Some(Err("denied".into())), ..Default::default() });
+        w.poll().await;
+        assert!(w.command(UiCommand::Quit).await);
+        assert_eq!(w.link.stops, 1);
+        assert!(!w.link.waited);
     }
 
     #[tokio::test(start_paused = true)]
