@@ -13,7 +13,7 @@ async-trait.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-tzf-rs = { version = "0", default-features = false }
+tzf-rs = { version = "2", default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
