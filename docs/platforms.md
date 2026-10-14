@@ -251,3 +251,15 @@ The deny list wins over every match. For example, a Hyper-V adapter is never a V
 - The coordinates are those of the agreeing answer closest to the others (total great-circle distance).
 - The time zone comes from the coordinates using built-in boundary data (`tzf-rs`). If that finds nothing, the time zone most often reported by the agreeing services is used if it is a valid zone, otherwise `UTC`.
 - The locale comes from a built-in country table, for example `DE` gives `de-DE`, `CH` gives `de-CH`, `IN` gives `en-IN`. Unknown countries give `en-US`.
+
+## Start at login (`geoveil autostart`)
+
+Per user only; no admin rights, no system service. The entry starts `geoveil-tray --autostart`.
+
+| OS | `enable` | `disable` | `status` |
+|---|---|---|---|
+| Windows | `reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Geoveil /t REG_SZ /d "\"<tray>\" --autostart" /f` | `reg delete ...\Run /v Geoveil /f` (a missing value is fine) | `reg query ...\Run /v Geoveil`, then `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run /v Geoveil` (first byte `03` = turned off in Task Manager) |
+| Linux | writes `$XDG_CONFIG_HOME/systemd/user/geoveil-tray.service` (`WantedBy=graphical-session.target`, `Restart=on-failure`), then `systemctl --user daemon-reload` and `systemctl --user enable geoveil-tray.service` | `systemctl --user disable geoveil-tray.service`, removes the file, `systemctl --user daemon-reload` | reads the file and `systemctl --user is-enabled geoveil-tray.service` |
+| macOS | writes `~/Library/LaunchAgents/io.geoveil.tray.plist` (`RunAtLoad`, restart only after a crash); launchd loads it at the next login | removes the file | reads the file |
+
+The tray path must be absolute and may not contain control characters or double quotes. It is quoted for the registry, escaped for systemd (`\`, `"`, `%`, `$`) and XML-escaped for the plist.

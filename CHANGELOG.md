@@ -102,10 +102,30 @@ describes what exists on `main` today (phases 1 and 2 of
   console close, logoff and shutdown events. A failed final restore is
   reported in the exit code.
 
+#### Tray, IPC and start at login (phase 8)
+
+- `geoveil run` serves local IPC (new `geoveil-ipc` crate): versioned JSON
+  lines (`status`, `restore_now`, `pause`, `resume`, `shutdown`) over a named
+  pipe on Windows (protected DACL for the current user, first instance only,
+  remote clients rejected) or a Unix socket elsewhere (mode 0600). Both ends
+  refuse peers running as another user. The status includes engaged, paused,
+  profile, VPN interfaces and the last error.
+- `geoveil-tray` (new crate, needs Rust 1.90): tray icon with status,
+  country / time zone, Pause / Resume, Restore now, Open log folder and Quit.
+  Starts `geoveil run` with the saved options when no daemon answers, and
+  stops it again on Quit. Linux uses the KSNI backend (no GTK).
+- `geoveil autostart enable|disable|status`: per-user login entry for the
+  tray (Windows HKCU Run key via `reg.exe`, Linux `systemd --user` unit,
+  macOS LaunchAgent). `enable` saves `--locale`, `--location` and
+  `--state-dir` for the tray-started daemon.
+
 #### Project
 
 - GitHub Actions CI on Windows, Ubuntu and macOS: `cargo build`,
   `cargo test` and `cargo clippy -D warnings`.
+- Release workflow on `v*` tags: builds `geoveil` and `geoveil-tray` for
+  Windows x86_64, Linux x86_64 and macOS x86_64 / arm64, publishes zip /
+  tar.gz archives and `SHA256SUMS`. The binaries are not code-signed.
 
 ### Not done yet
 
@@ -114,6 +134,6 @@ describes what exists on `main` today (phases 1 and 2 of
 - Browser extension bridge (phase 4).
 - Leak checks for DNS, IPv6 and WebRTC (phase 5).
 - macOS expert mode (phase 7).
-- Tray UI (phase 8).
+- Code signing of release binaries.
 
 [Unreleased]: https://github.com/Hamid-Jahani/geoveil/commits/main
