@@ -25,7 +25,7 @@ Rules that apply to all backends:
 
 ## Windows
 
-Backends: `timezone`, and `locale` with `--locale`. There is no Windows location backend yet. With `--location`, Geoveil logs a warning ("Windows location spoofing lands in phase 3") and continues without it.
+Backends: `timezone`, and `locale` with `--locale`. There is no Windows location backend, and none is planned. With `--location`, Geoveil logs a warning ("Windows location spoofing is not available") and continues without it.
 
 ### Time zone
 

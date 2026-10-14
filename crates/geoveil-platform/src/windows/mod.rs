@@ -26,7 +26,7 @@ pub fn backends(runner: Arc<dyn CommandRunner>, opts: &BackendOptions) -> Vec<Bo
         out.push(Box::new(LocaleBackend::new(runner)));
     }
     if opts.location {
-        tracing::warn!("Windows location spoofing lands in phase 3; the location backend is not available yet");
+        tracing::warn!("Windows location spoofing is not available; continuing without a location backend");
     }
     out
 }

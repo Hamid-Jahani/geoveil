@@ -5,8 +5,8 @@
 Geoveil makes your operating system's time zone, locale and location match your VPN exit.
 
 > Status: early (version 0.1.0). Time zone and locale work on Windows, Linux and macOS.
-> Location works on Linux (geoclue) and is block-only on macOS. Windows location is planned.
-> A tray app (`geoveil-tray`) and start at login are available.
+> Location works on Linux (geoclue) and is block-only on macOS. Windows location is not spoofed.
+> A tray app (`geoveil-tray`), start at login and a read-only leak check (`geoveil leaks`) are available.
 
 ## Why
 
@@ -28,9 +28,9 @@ Geoveil does **not** provide a VPN and does **not** change your IP. You keep usi
 
 | OS | Time zone | Locale (opt-in, `--locale`) | Location (opt-in, `--location`) |
 |---|---|---|---|
-| Windows | Yes: `tzutil` | Yes: `Set-Culture`, `Set-WinHomeLocation` (per user) | Planned (phase 3, phase 6) |
+| Windows | Yes: `tzutil` | Yes: `Set-Culture`, `Set-WinHomeLocation` (per user) | No (not planned) |
 | Linux | Yes: `timedatectl` | Yes: `localectl` (new sessions only) | Yes: geoclue static source (geoclue 2.7 or newer) |
-| macOS | Yes: `systemsetup` | Yes: `defaults -g AppleLocale` | Block only: turns Location Services off. Real spoofing is planned (phase 7) |
+| macOS | Yes: `systemsetup` | Yes: `defaults -g AppleLocale` | Block only: turns Location Services off |
 
 The time zone is always changed. Locale and location are only changed when you pass `--locale` or `--location`.
 
@@ -124,6 +124,7 @@ The daemon checks the interfaces every 5 seconds (`--interval-secs N`). It also 
 - VPN exit changes: it applies the new profile. The original settings saved the first time are kept.
 - VPN goes down: it restores the original settings.
 - You press Ctrl-C, or the process gets SIGTERM/SIGHUP (Linux, macOS) or a console close, logoff or shutdown event (Windows): it restores and exits.
+- You sign out of Windows or shut it down: a hidden window asks Windows to wait ("Geoveil is restoring your settings") and the daemon restores before it lets the sign-out continue, for at most 20 seconds. This also works for a daemon started by the tray, which has no console. Details: [docs/platforms.md](docs/platforms.md#sign-out-and-shutdown-geoveil-run).
 
 If an apply or restore fails, the daemon retries after 30 seconds, then doubles the wait each time, up to 10 minutes.
 
@@ -164,6 +165,24 @@ geoveil autostart disable
 
 `enable` also saves `--locale`, `--location` and `--state-dir` in `daemon.json` in the geoveil config folder (`%APPDATA%\geoveil`, `~/.config/geoveil`, `~/Library/Application Support/geoveil`). The tray passes them to the daemon it starts. You can also set `sticky`, `interval_secs` and `geoveil_path` there by hand.
 
+### Check for leaks
+
+```sh
+geoveil leaks                 # changes nothing, needs no admin rights
+geoveil leaks --active-dns    # also run Mullvad's DNS leak test (opt-in)
+geoveil --json leaks          # machine-readable report
+```
+
+`leaks` checks whether information escapes the VPN and prints one line per check (`PASS`, `INFO`, `N/A`, `WARN`, `LEAK` or `ERROR`):
+
+- **vpn:** the VPN interfaces found and the exit IP.
+- **ipv6:** asks IPv6-only endpoints which address they see. A non-VPN IPv6 address of this machine while a VPN is up is a leak.
+- **webrtc:** sends STUN requests over the default route and from each physical interface with a gateway, as a browser's WebRTC would. An answer that is not the VPN exit is a leak.
+- **dns:** lists the configured resolvers per interface. A public resolver on a non-VPN interface while a VPN is up is a leak; a LAN resolver is a warning. With `--active-dns`, Mullvad's test shows which resolvers really answered.
+- **verify:** while a profile is engaged, the usual verify results.
+
+`--no-ipv6`, `--no-stun` and `--stun HOST:PORT` (repeatable) skip or redirect probes. Exit code 3 means at least one leak was found. The report lists every host it contacted. Details per OS: [docs/platforms.md](docs/platforms.md#leak-checks).
+
 ### Choose the location yourself
 
 ```sh
@@ -186,7 +205,7 @@ These work with every command, before or after the command name.
 | Option | Meaning |
 |---|---|
 | `--locale` | Also change the system locale / region formats. Off by default. |
-| `--location` | Also drive the OS location service (Linux: geoclue; macOS: turn Location Services off; Windows: not yet available, a warning is printed). |
+| `--location` | Also drive the OS location service (Linux: geoclue; macOS: turn Location Services off; Windows: not available, a warning is printed). |
 | `--json` | Print JSON on stdout (`run` only logs). Logs stay on stderr. |
 | `--state-dir PATH` | Where the state file and lock file live. See [Safety](#safety). |
 | `--provider-timeout-secs N` | Timeout for each public-IP and geolocation request, 1 to 120 seconds. Default 5. |
@@ -262,9 +281,9 @@ All requests use the normal system route. When your VPN carries the default rout
 
 ## Limitations
 
-- Windows location is not spoofed yet. `--location` on Windows prints a warning and does nothing.
-- On Windows, signing out or shutting down may not restore your settings: Windows does not deliver its logoff and shutdown console events to processes that use the GUI libraries or run without a console window, which includes a daemon started by the tray. Use **Quit** or **Restore original settings now** first, or run `geoveil restore` after the next sign-in. A fix is planned.
-- macOS location is only blocked, not spoofed: Location Services is turned off. On recent macOS versions, System Integrity Protection (SIP) may keep this from taking effect until a reboot, or at all.
+- Windows location is not spoofed, and no Windows location backend is planned. `--location` on Windows prints a warning and does nothing.
+- On Windows, a sign-out or shutdown waits at most 20 seconds for the restore. If the restore does not finish in time, the snapshot is kept: run `geoveil restore` after the next sign-in. `geoveil status` shows whether a snapshot is left.
+- macOS location is only blocked, not spoofed: Location Services is turned off. Real spoofing on macOS is not planned. On recent macOS versions, System Integrity Protection (SIP) may keep this from taking effect until a reboot, or at all.
 - Linux location only affects apps that use geoclue (GNOME, KDE, Firefox with the geoclue provider, and so on). It needs geoclue 2.7 or newer.
 - Linux locale changes only affect sessions started after the change. Log out and back in.
 - On Linux, `localectl` refuses locales that are not installed. Geoveil checks `locale -a` first and tells you how to install the missing one.
@@ -272,7 +291,8 @@ All requests use the normal system route. When your VPN carries the default rout
 - Windows locale changes the regional format and home location only. The input language list (keyboard layouts) is never touched.
 - Some countries have no known Windows GeoID in the built-in table. Then only the regional format is changed.
 - `geoveil leaks` detects DNS, IPv6 and WebRTC leaks but does not fix them. With a VPN on your router or a proxy, this machine cannot see your real IP, so it cannot prove there is no leak. See [docs/platforms.md](docs/platforms.md#leak-checks).
-- Geoveil does not change what your browser reports through its own APIs. A browser extension bridge is planned (phase 4).
+- Geoveil does not change what your browser reports through its own APIs (for example the browser geolocation API or WebRTC). No browser extension bridge is planned. `geoveil leaks` shows what WebRTC would expose.
+- `geoveil status` reads the state file; it does not ask a running daemon over IPC yet (the tray does).
 - VPN detection uses adapter names. An unusual VPN adapter name may not be recognized. Run `geoveil detect` to check.
 
 ## Roadmap
@@ -281,11 +301,11 @@ All requests use the normal system route. When your VPN carries the default rout
 |---|---|---|
 | 1 | Core, VPN detection, geolocation consensus, time zone and locale on 3 OSes, CLI | Implemented (on `main`, not released yet) |
 | 2 | Linux geoclue location backend | Implemented (on `main`, not released yet) |
-| 3 | Windows location via a virtual NMEA serial port | Planned |
-| 4 | Browser extension bridge (native messaging, push the profile to the browser) | Planned |
-| 5 | Leak checks (DNS, IPv6, WebRTC/STUN) | Planned |
-| 6 | Windows GNSS sensor driver (UMDF) | Planned |
-| 7 | macOS expert mode (real location spoofing) | Planned |
+| 3 | Windows location via a virtual NMEA serial port | Not pursued |
+| 4 | Browser extension bridge (native messaging, push the profile to the browser) | Not pursued |
+| 5 | Leak checks (DNS, IPv6, WebRTC/STUN): `geoveil leaks` | Implemented (not released yet) |
+| 6 | Windows GNSS sensor driver (UMDF) | Not pursued |
+| 7 | macOS expert mode (real location spoofing) | Not pursued; macOS location stays block-only |
 | 8 | Tray UI talking to the daemon over local IPC, start at login, release builds | Implemented (not released yet) |
 
 ## Project layout
@@ -293,10 +313,11 @@ All requests use the normal system route. When your VPN carries the default rout
 ```text
 crates/
   geoveil-core      pure logic, no OS calls: profile, VPN detection, IP geolocation and voting,
-                    offline time zone and locale lookup, orchestrator, snapshot store
+                    offline time zone and locale lookup, orchestrator, snapshot store,
+                    leak-check verdicts and STUN codec
   geoveil-platform  OS backends (Windows, Linux, macOS) behind one trait, interface listing,
-                    command runner
-  geoveil-cli       the `geoveil` binary: detect, apply, restore, status, run, autostart
+                    command runner, DNS resolver discovery and interface-bound STUN probes
+  geoveil-cli       the `geoveil` binary: detect, apply, restore, status, run, leaks, autostart
   geoveil-ipc       local IPC between the daemon and the tray: protocol, per-user endpoint
   geoveil-tray      the `geoveil-tray` binary: tray icon and menu
 docs/

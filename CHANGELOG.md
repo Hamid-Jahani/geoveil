@@ -8,8 +8,7 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 Nothing has been released yet. The workspace version is `0.1.0`. This section
-describes what exists on `main` today (phases 1 and 2 of
-[docs/design.md](docs/design.md)).
+describes phases 1, 2, 5 and 8 of [docs/design.md](docs/design.md).
 
 ### Added
 
@@ -85,7 +84,30 @@ describes what exists on `main` today (phases 1 and 2 of
   Restores on VPN down and on stop unless `--sticky` is set.
 - Global flags: `--json`, `--locale`, `--location`, `--state-dir`,
   `-v` / `-vv` / `-vvv`, `--provider-timeout-secs`.
-- Exit codes: 0 success, 1 failure, 2 some backends failed.
+- Exit codes: 0 success, 1 failure, 2 some backends failed, 3 `leaks` found
+  a leak.
+
+#### Leak checks (phase 5)
+
+- `geoveil leaks [--json] [--active-dns] [--stun HOST:PORT]... [--no-stun]
+  [--no-ipv6]`: read-only report with one verdict per check (`PASS`, `INFO`,
+  `N/A`, `WARN`, `LEAK`, `ERROR`). Exit code 3 when a leak is found, 1 when a
+  check could not run and no leak was found.
+- IPv6: IPv6-only endpoints (`api6.ipify.org`, `ipv6.icanhazip.com`) with
+  proxies off; a non-VPN global address of this machine (or its /64) while a
+  VPN is up is a leak.
+- WebRTC: hand-written STUN Binding codec (RFC 8489, FINGERPRINT checked,
+  tested against the RFC 5769 vectors) and UDP probes bound to each physical
+  interface with a gateway plus the default route (`IP_UNICAST_IF` /
+  `IPV6_UNICAST_IF` on Windows, `SO_BINDTOIFINDEX` on Linux, `IP_BOUND_IF` on
+  macOS), retried after 500, 1000 and 2000 ms.
+- DNS: resolver discovery per interface (`Get-DnsClientServerAddress` on
+  Windows, `resolvectl status` with a `/etc/resolv.conf` fallback on Linux,
+  `scutil --dns` on macOS). Public resolvers on non-VPN interfaces are a
+  leak, LAN resolvers a warning.
+- `--active-dns` (opt-in): Mullvad's unique-subdomain DNS leak test.
+- While engaged, the orchestrator's verify results are included (a mismatch
+  is a warning, never a leak).
 
 #### Safety
 
@@ -101,6 +123,12 @@ describes what exists on `main` today (phases 1 and 2 of
 - Daemon stops and restores on Ctrl-C, SIGTERM and SIGHUP, and on Windows
   console close, logoff and shutdown events. A failed final restore is
   reported in the exit code.
+- Windows sign-out and shutdown: `geoveil run` owns a hidden top-level window
+  that sets a shutdown block reason on `WM_QUERYENDSESSION` and, on
+  `WM_ENDSESSION`, stops the daemon and waits up to 20 s for the restore. A
+  cancelled sign-out stops nothing. This covers daemons without a console
+  (started by the tray), where the console logoff / shutdown events are not
+  delivered.
 
 #### Tray, IPC and start at login (phase 8)
 
@@ -127,13 +155,13 @@ describes what exists on `main` today (phases 1 and 2 of
   Windows x86_64, Linux x86_64 and macOS x86_64 / arm64, publishes zip /
   tar.gz archives and `SHA256SUMS`. The binaries are not code-signed.
 
-### Not done yet
+### Not done
 
-- Windows location spoofing (phase 3: virtual NMEA port; phase 6: GNSS
-  driver). `--location` on Windows only logs a warning.
-- Browser extension bridge (phase 4).
-- Leak checks for DNS, IPv6 and WebRTC (phase 5).
-- macOS expert mode (phase 7).
+- Windows location spoofing (phases 3 and 6) and the browser extension
+  bridge (phase 4) are not being pursued. `--location` on Windows only logs a
+  warning.
+- macOS location stays block-only (phase 7, expert mode, is not pursued).
+- `geoveil status` does not query a running daemon over IPC.
 - Code signing of release binaries.
 
 [Unreleased]: https://github.com/Hamid-Jahani/geoveil/commits/main
