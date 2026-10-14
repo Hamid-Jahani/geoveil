@@ -9,9 +9,16 @@
 //!   instance (`FILE_FLAG_FIRST_PIPE_INSTANCE`, so a squatter's pipe makes the
 //!   daemon fail instead of sharing the name) and with
 //!   `PIPE_REJECT_REMOTE_CLIENTS` (interprocess sets both).
-//! - **Unix:** `$XDG_RUNTIME_DIR/geoveil.sock` on Linux, otherwise
-//!   `<local data dir>/geoveil/geoveil.sock`, created with mode 0600 in a
-//!   directory only the user can enter.
+//! - **Unix:** `geoveil.sock` in a directory used for nothing else:
+//!   `$XDG_RUNTIME_DIR/geoveil/` (not on macOS), otherwise
+//!   `<local data dir>/geoveil/run/`, or `/var/run/geoveil/` when running as
+//!   root (so `sudo` never creates root-owned folders in the user's home).
+//!   That directory is forced to mode 0700 on every bind, even when it
+//!   already exists, after checking it is a real directory we own. The socket
+//!   gets mode 0600: atomically before `bind()` where `fchmod()` works on
+//!   sockets (Linux, FreeBSD, OpenBSD), otherwise (macOS, where it fails with
+//!   `EINVAL`) with a `chmod` right after; the 0700 directory closes that
+//!   window.
 //!
 //! Both sides also check the peer: the server refuses a client, and the
 //! client refuses a server, that runs as another user (see
@@ -138,8 +145,19 @@ impl Endpoint {
         }
         #[cfg(not(windows))]
         {
-            let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-            socket_path_for(runtime, dirs::data_local_dir())
+            // A freedesktop convention: on macOS a terminal may export it
+            // while the LaunchAgent-started tray does not, and the two would
+            // look in different places.
+            let runtime = if cfg!(target_os = "macos") {
+                None
+            } else {
+                std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from)
+            };
+            #[cfg(unix)]
+            let root = peer::current_uid() == 0;
+            #[cfg(not(unix))]
+            let root = false;
+            socket_path_for(runtime, dirs::data_local_dir(), root)
                 .map(Endpoint::Socket)
                 .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no runtime or data directory for the IPC socket"))
         }
@@ -172,13 +190,23 @@ pub fn pipe_name_for(sid: &str) -> String {
     format!("geoveil-{sid}")
 }
 
-/// Socket path: inside `$XDG_RUNTIME_DIR` when it is set to an absolute path
-/// (Linux; the directory is private to the user), otherwise inside the
-/// geoveil data directory.
-pub fn socket_path_for(runtime_dir: Option<PathBuf>, data_dir: Option<PathBuf>) -> Option<PathBuf> {
+/// Socket directory for a daemon running as root.
+pub const ROOT_SOCKET_DIR: &str = "/var/run/geoveil";
+
+/// Socket file name inside its directory.
+pub const SOCKET_FILE: &str = "geoveil.sock";
+
+/// Socket path, always in a directory dedicated to it (so it can be forced
+/// to mode 0700): [`ROOT_SOCKET_DIR`] for root; else `geoveil/` inside
+/// `$XDG_RUNTIME_DIR` when that is set to an absolute path (pass `None` on
+/// macOS); else `geoveil/run/` inside the local data directory.
+pub fn socket_path_for(runtime_dir: Option<PathBuf>, data_dir: Option<PathBuf>, root: bool) -> Option<PathBuf> {
+    if root {
+        return Some(PathBuf::from(ROOT_SOCKET_DIR).join(SOCKET_FILE));
+    }
     match runtime_dir.filter(|d| d.is_absolute()) {
-        Some(dir) => Some(dir.join("geoveil.sock")),
-        None => data_dir.map(|d| d.join("geoveil").join("geoveil.sock")),
+        Some(dir) => Some(dir.join("geoveil").join(SOCKET_FILE)),
+        None => data_dir.map(|d| d.join("geoveil").join("run").join(SOCKET_FILE)),
     }
 }
 
@@ -203,14 +231,13 @@ pub fn bind(endpoint: &Endpoint) -> io::Result<Listener> {
     }
     #[cfg(unix)]
     {
-        use interprocess::os::unix::local_socket::ListenerOptionsExt;
         if let Endpoint::Socket(path) = endpoint {
             prepare_socket_dir(path)?;
         }
-        opts = opts.mode(0o600);
+        opts = with_socket_mode(opts);
     }
-    match opts.create_tokio() {
-        Ok(l) => Ok(l),
+    let listener = match opts.create_tokio() {
+        Ok(l) => l,
         #[cfg(unix)]
         Err(e) if e.kind() == io::ErrorKind::AddrInUse => {
             // A stale socket file from a crashed daemon, or a live daemon.
@@ -218,24 +245,56 @@ pub fn bind(endpoint: &Endpoint) -> io::Result<Listener> {
             if let Endpoint::Socket(path) = endpoint {
                 remove_stale_socket(path)?;
             }
-            let name = endpoint.name()?;
-            use interprocess::os::unix::local_socket::ListenerOptionsExt;
-            ListenerOptions::new().name(name).mode(0o600).create_tokio()
+            with_socket_mode(ListenerOptions::new().name(endpoint.name()?)).create_tokio()?
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
+    };
+    #[cfg(unix)]
+    if let Endpoint::Socket(path) = endpoint {
+        use std::os::unix::fs::PermissionsExt;
+        // Covers the systems where the pre-bind fchmod is not available.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(listener)
+}
+
+/// Asks interprocess for mode 0600 before `bind()` where `fchmod()` works on
+/// a socket. Elsewhere (macOS returns `EINVAL`, which interprocess reports as
+/// `Unsupported` and fails the whole bind) the mode is set after binding.
+#[cfg(unix)]
+fn with_socket_mode(opts: ListenerOptions<'_>) -> ListenerOptions<'_> {
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "openbsd"))]
+    {
+        use interprocess::os::unix::local_socket::ListenerOptionsExt;
+        opts.mode(0o600)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "freebsd", target_os = "openbsd")))]
+    {
+        opts
     }
 }
 
-/// Creates the socket's directory (mode 0700 when we create it).
+/// Creates the socket's dedicated directory with mode 0700, or checks that
+/// an existing one is a real directory (not a symlink) owned by us and
+/// forces it to 0700.
 #[cfg(unix)]
 fn prepare_socket_dir(path: &std::path::Path) -> io::Result<()> {
-    use std::os::unix::fs::DirBuilderExt;
-    if let Some(dir) = path.parent() {
-        if !dir.exists() {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let Some(dir) = path.parent() else { return Ok(()) };
+    match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         }
+        Err(e) => return Err(e),
+        Ok(meta) if !meta.is_dir() || meta.uid() != peer::current_uid() => {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("{} is not a directory owned by this user; not putting the IPC socket there", dir.display()),
+            ));
+        }
+        Ok(_) => {}
     }
-    Ok(())
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
 /// Removes a stale socket file we own; refuses anything else.
@@ -522,8 +581,34 @@ mod tests {
             let Endpoint::Socket(path) = &endpoint else { unreachable!() };
             let mode = std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
             assert_eq!(mode & 0o077, 0, "socket mode {mode:o} must not grant group/other access");
+            let dir_mode = std::fs::metadata(path.parent().unwrap()).unwrap().permissions().mode() & 0o777;
+            assert_eq!(dir_mode, 0o700);
             let _ = std::fs::remove_dir_all(path.parent().unwrap());
         });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn existing_socket_dir_is_made_private_and_symlinks_are_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = std::env::temp_dir().join(format!("gv-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // Created earlier with a default (world-readable) mode.
+        let dir = base.join("run");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        prepare_socket_dir(&dir.join(SOCKET_FILE)).unwrap();
+        assert_eq!(std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777, 0o700);
+
+        let link = base.join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let err = prepare_socket_dir(&link.join(SOCKET_FILE)).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+
+        let missing = base.join("a").join("b");
+        prepare_socket_dir(&missing.join(SOCKET_FILE)).unwrap();
+        assert_eq!(std::fs::metadata(&missing).unwrap().permissions().mode() & 0o777, 0o700);
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
@@ -538,11 +623,19 @@ mod tests {
         // Absolute on every OS.
         let runtime = std::env::temp_dir().join("run-user-1000");
         let data = std::env::temp_dir().join("share");
-        let in_data = data.join("geoveil").join("geoveil.sock");
-        assert_eq!(socket_path_for(Some(runtime.clone()), Some(data.clone())), Some(runtime.join("geoveil.sock")));
+        let in_data = data.join("geoveil").join("run").join("geoveil.sock");
+        assert_eq!(
+            socket_path_for(Some(runtime.clone()), Some(data.clone()), false),
+            Some(runtime.join("geoveil").join("geoveil.sock"))
+        );
         // A relative XDG_RUNTIME_DIR is invalid per the spec and ignored.
-        assert_eq!(socket_path_for(Some(PathBuf::from("relative")), Some(data.clone())), Some(in_data.clone()));
-        assert_eq!(socket_path_for(None, Some(data)), Some(in_data));
-        assert_eq!(socket_path_for(None, None), None);
+        assert_eq!(socket_path_for(Some(PathBuf::from("relative")), Some(data.clone()), false), Some(in_data.clone()));
+        assert_eq!(socket_path_for(None, Some(data.clone()), false), Some(in_data));
+        assert_eq!(socket_path_for(None, None, false), None);
+        // Root never uses a (possibly the sudo user's) home directory.
+        assert_eq!(
+            socket_path_for(Some(runtime), Some(data), true),
+            Some(PathBuf::from("/var/run/geoveil").join("geoveil.sock"))
+        );
     }
 }
