@@ -1,7 +1,7 @@
 # Geoveil — system-wide location consistency with your VPN
 
 Date: 2026-10-14
-Status: approved (phase 1 in progress)
+Status: approved (phases 1 and 2 implemented on `main`, not released yet)
 
 ## Goal
 
@@ -110,8 +110,8 @@ geoveil leaks             phase 5
 
 ## Phases
 
-1. Core + VPN detect + geo resolve + timezone/locale backends on 3 OSes + CLI  ← now
-2. Linux geoclue location backend                                            ← now
+1. Core + VPN detect + geo resolve + timezone/locale backends on 3 OSes + CLI  ← implemented
+2. Linux geoclue location backend                                            ← implemented
 3. Windows NMEA virtual-port location backend
 4. Browser extension bridge (native messaging, push Profile)
 5. Leak checks (DNS, IPv6, WebRTC/STUN)

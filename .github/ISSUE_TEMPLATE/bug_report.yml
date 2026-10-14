@@ -1,0 +1,81 @@
+name: Bug report
+description: Something does not work as expected.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Please fill in as much as you can.
+        For security problems, do not use this form. See the security policy instead.
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system and version
+      placeholder: "Windows 11 23H2 / Ubuntu 24.04 / macOS 14.5"
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Geoveil version or commit
+      description: Output of `geoveil --version`, and the commit hash if you built from source.
+      placeholder: "geoveil 0.1.0 (commit abc1234)"
+    validations:
+      required: true
+
+  - type: input
+    id: vpn
+    attributes:
+      label: VPN client
+      description: Name and version of the VPN client, and protocol if known.
+      placeholder: "WireGuard 0.5.3 / Mullvad 2024.4 (WireGuard) / OpenVPN 2.6"
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command you ran
+      description: The full command line, including flags.
+      placeholder: "geoveil apply --locale"
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: status
+    attributes:
+      label: Output of `geoveil status --json`
+      description: Run it after the problem happened. Remove anything you consider private.
+      render: json
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Run the command again with `-vv` and paste the output. Remove your real IP address or location if they appear.
+      render: text
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else
+      description: Run as administrator / with sudo? Desktop environment? Other context.
