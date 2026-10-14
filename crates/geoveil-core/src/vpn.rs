@@ -12,7 +12,10 @@
 //!
 //! - brand/driver substrings: `wireguard`, `wintun`, `openvpn`, `tap-windows`,
 //!   `nordlynx`, `protonvpn`, `mullvad`, `expressvpn`, `surfshark`,
-//!   `cisco anyconnect`, `fortinet`, `fortissl`, `globalprotect`, `pangp`;
+//!   `cisco anyconnect`, `fortinet`, `fortissl`, `globalprotect`, `pangp`,
+//!   `cloudflarewarp` / `cloudflare warp` (Cloudflare WARP / 1.1.1.1),
+//!   `windscribe`, `private internet access`, `cyberghost`, `hotspot shield`,
+//!   `vyprvpn`, `ivpn`, `softether`;
 //! - word tokens of the form `wg<digits>`, `tun<digits>`, `tap<digits>`,
 //!   `utun<digits>`, `ppp<digits>`, `proton<digits>` (ProtonVPN's WireGuard
 //!   interface on Linux), or starting with `ipsec`.
@@ -49,6 +52,15 @@ const VPN_SUBSTRINGS: &[&str] = &[
     "fortissl",
     "globalprotect",
     "pangp",
+    "cloudflarewarp",
+    "cloudflare warp",
+    "windscribe",
+    "private internet access",
+    "cyberghost",
+    "hotspot shield",
+    "vyprvpn",
+    "ivpn",
+    "softether",
 ];
 
 /// Token prefixes that must be followed by one or more digits only.
@@ -332,9 +344,30 @@ mod tests {
             "Cisco AnyConnect Secure Mobility Client Virtual Miniport Adapter for Windows x64",
             "PANGP Virtual Ethernet Adapter",
             "Fortinet SSL VPN Virtual Ethernet Adapter",
+            "Cloudflare WARP Interface Tunnel",
+            "Windscribe Windtun420",
+            "Private Internet Access Network Adapter",
+            "SoftEther VPN Client Adapter - VPN",
         ] {
             assert!(is_vpn_interface(&win(d)), "expected VPN: {d}");
         }
+    }
+
+    #[test]
+    fn cloudflare_warp_as_seen_on_windows_is_positive() {
+        // Exact strings netdev reports for WARP on Windows 11.
+        let warp = NetInterface {
+            name: "{DB484304-DB04-6AA0-A33D-7236836B364D}".into(),
+            description: "CloudflareWARP | Cloudflare WARP Interface Tunnel".into(),
+            is_up: true,
+            addrs: vec!["172.16.0.2".parse().unwrap()],
+        };
+        assert!(is_vpn_interface(&warp));
+        // Linux / macOS interface name.
+        let mut unix = warp.clone();
+        unix.name = "CloudflareWARP".into();
+        unix.description = String::new();
+        assert!(is_vpn_interface(&unix));
     }
 
     #[test]
