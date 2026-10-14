@@ -251,3 +251,91 @@ The deny list wins over every match. For example, a Hyper-V adapter is never a V
 - The coordinates are those of the agreeing answer closest to the others (total great-circle distance).
 - The time zone comes from the coordinates using built-in boundary data (`tzf-rs`). If that finds nothing, the time zone most often reported by the agreeing services is used if it is a valid zone, otherwise `UTC`.
 - The locale comes from a built-in country table, for example `DE` gives `de-DE`, `CH` gives `de-CH`, `IN` gives `en-IN`. Unknown countries give `en-US`.
+
+## Leak checks
+
+`geoveil leaks [--json] [--active-dns] [--stun HOST:PORT]... [--no-stun] [--no-ipv6]` tells you whether information escapes your VPN. It changes nothing on the system and needs no admin rights.
+
+Exit codes: **0** no leak found, **3** at least one leak found, **1** a check could not run (and no leak was found).
+
+The pure logic (STUN codec, verdict rules, report) is in `geoveil-core/src/leaks/`. The OS probes (interfaces, DNS resolvers, interface-bound UDP sockets) are in `geoveil-platform/src/leaks/`.
+
+Each check ends as `PASS`, `INFO`, `N/A`, `WARN`, `LEAK` or `ERROR`. Only `LEAK` sets exit code 3.
+
+### When no VPN interface is found
+
+The VPN may run on your router or be a proxy. Then this machine cannot see your real ISP address, so it cannot prove there is no leak. The checks report `INFO` and compare against the current public IP instead.
+
+### 1. VPN and exit IP
+
+- VPN interfaces are found with the same rules as `detect` (see [VPN detection](#vpn-detection)).
+- The exit IP is the normal public-IP lookup (`api.ipify.org`, `icanhazip.com`, `ifconfig.me`, IPv4 first).
+- If the exit IP cannot be found, the check is `ERROR`.
+
+### 2. IPv6
+
+- The probe asks IPv6-only endpoints (`https://api6.ipify.org`, then `https://ipv6.icanhazip.com`) over a socket bound to `::`, with proxies turned off.
+- **LEAK:** a VPN is up, and the address the endpoint sees is one of this machine's global IPv6 addresses on a non-VPN interface, or is in the same /64. IPv6 normally has no NAT, so this is proof.
+- **PASS:** the endpoint sees some other address (tunnelled IPv6), or it cannot be reached at all while the VPN is up (IPv6 blocked).
+- **N/A:** no global IPv6 address (`2000::/3`) on any up physical interface.
+
+### 3. WebRTC (STUN)
+
+Browsers gather WebRTC candidates on every interface. So Geoveil sends a STUN Binding request (RFC 8489, hand-written codec tested against the RFC 5769 sample messages) from each place a browser would:
+
+- One request over the default route, per address family.
+- One request from each up, non-loopback, non-VPN interface that has a default gateway, per family (first usable IPv4 address, first global IPv6 address). Host-only adapters without a gateway (Hyper-V `vEthernet` and similar) are skipped, unless no interface reports a gateway at all.
+
+Default servers are `stun.l.google.com:19302` and `stun.cloudflare.com:3478`; `--stun` replaces them. Each request is sent up to 3 times, waiting 500, 1000 and 2000 ms.
+
+The socket is bound to both the local address and the interface:
+
+| OS | Interface binding |
+|---|---|
+| Windows | `setsockopt(IPPROTO_IP, IP_UNICAST_IF)` with the interface index in network byte order; `setsockopt(IPPROTO_IPV6, IPV6_UNICAST_IF)` in host byte order. Raw `windows-sys` call: socket2 has no Windows wrapper. |
+| Linux | `SO_BINDTOIFINDEX` (socket2 `bind_device_by_index_v4/v6`). Kernels before 5.7 may need `CAP_NET_RAW`; a refusal is reported as "blocked", not as an error. |
+| macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` (same socket2 calls). |
+
+Verdicts:
+
+- **LEAK:** a VPN is up and a request bound to a physical interface gets an answer whose public address is not the VPN exit. Any web page can learn that address through WebRTC. The advice is to turn on the VPN's kill switch, or limit WebRTC in the browser (Firefox `media.peerconnection.ice.default_address_only`, Chromium-based browsers: WebRTC IP handling `disable_non_proxied_udp`).
+- **WARN:** the default-route answer differs from the exit (a VPN with a separate UDP exit, or a partial tunnel). Also `WARN` with no local VPN when UDP leaves with another address than HTTPS (what a proxy-style VPN would leak).
+- **PASS:** every answer shows the exit IP, or the physical-interface requests get no answer or no route while the VPN is up (a working kill switch).
+- "No route" and "blocked" answers are listed but never count as a leak.
+
+### 4. DNS
+
+Configured resolvers are listed per interface, read-only:
+
+| OS | Command | Notes |
+|---|---|---|
+| Windows | `powershell -NoProfile -NonInteractive -Command <script>` running `Get-DnsClientServerAddress`, printed as JSON | Windows' placeholder `fec0:0:0:ffff::1..3` entries are ignored. |
+| Linux | `resolvectl status --no-pager` | Falls back to `/etc/resolv.conf` (no interface information) when `resolvectl` is missing or fails. |
+| macOS | `scutil --dns` | Both the default and the "for scoped queries" resolver lists are read. |
+
+While a VPN is up, a resolver set on an up, non-VPN, non-loopback interface (and not also set on the VPN interface) is flagged:
+
+- **LEAK** for a public resolver (for example `8.8.8.8` on `Ethernet`).
+- **WARN** for a LAN resolver (for example `192.168.1.1`): your router may forward the queries to your ISP outside the tunnel, unless the router itself is behind the VPN.
+- Resolvers on down interfaces and local stubs (`127.0.0.53`) are listed but not flagged.
+
+If the resolvers cannot be listed, the check is `ERROR`.
+
+#### `--active-dns` (opt-in)
+
+Runs Mullvad's DNS leak test, which works with any VPN:
+
+1. `GET https://am.i.mullvad.net/json` describes the exit (IP, organization, country).
+2. Three times, `GET https://<random>.dnsleak.am.i.mullvad.net/` with `Accept: application/json`. The never-seen name is resolved by the **system resolver**, so Mullvad's DNS server sees which resolvers asked and returns them.
+
+Mullvad learns your exit IP, your resolvers and the random names. Nothing is sent unless you pass `--active-dns`.
+
+A resolver is `PASS` when it is in the exit's network (same organization, same /24 or /48, or Mullvad's own DNS). It is `LEAK` when it is one of this machine's own addresses. It is `WARN` when a VPN is up and the resolver is in another country than the exit (possibly your ISP's resolver), and `INFO` otherwise (a third-party public resolver).
+
+### 5. Verify (only while engaged)
+
+When `apply` or `run` has engaged a profile, the orchestrator's verify results are included. A mismatch is a `WARN` (re-apply), never a `LEAK`.
+
+### Proxies
+
+The IPv6 probe and the active DNS test turn off `HTTP(S)_PROXY` (`no_proxy()`). Geoveil's reqwest build has no `system-proxy` feature, so the Windows registry proxy is never used. The exit IP lookup is the shared public-IP lookup, which honours `HTTP(S)_PROXY` environment variables.

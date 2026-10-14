@@ -161,6 +161,7 @@ These work with every command, before or after the command name.
 | 0 | Success. `restore` with nothing to restore also returns 0. |
 | 1 | Error (for example no geolocation consensus, or another Geoveil holds the lock). |
 | 2 | Partial: some settings were applied or restored, others failed. |
+| 3 | `leaks` found at least one leak. |
 
 ## Privileges
 
@@ -211,6 +212,7 @@ Geoveil sends no telemetry. The only network requests are:
 
 - **Public IP lookup:** `https://api.ipify.org`, `https://icanhazip.com`, `https://ifconfig.me/ip`.
 - **IP geolocation:** `https://ipwho.is`, `https://ipapi.co`, `http://ip-api.com`, `https://ipinfo.io` (free endpoints, no API key). The IP being located is part of the request URL.
+- **`geoveil leaks` only:** `https://api6.ipify.org`, `https://ipv6.icanhazip.com`, and STUN over UDP to `stun.l.google.com:19302` and `stun.cloudflare.com:3478` (or your `--stun` servers). With `--active-dns` also `https://am.i.mullvad.net` and `https://<random>.dnsleak.am.i.mullvad.net`. The report lists every host it contacted.
 
 ip-api.com's free tier only supports plain **HTTP**. When the VPN carries your traffic, the request goes through the tunnel, but it is not encrypted between the VPN exit and ip-api.com.
 
@@ -228,7 +230,7 @@ All requests use the normal system route. When your VPN carries the default rout
 - Running apps may need a restart to see a new locale (Windows, macOS).
 - Windows locale changes the regional format and home location only. The input language list (keyboard layouts) is never touched.
 - Some countries have no known Windows GeoID in the built-in table. Then only the regional format is changed.
-- No leak checks yet. DNS, IPv6 and WebRTC leaks are not detected (planned, phase 5).
+- `geoveil leaks` detects DNS, IPv6 and WebRTC leaks but does not fix them. With a VPN on your router or a proxy, this machine cannot see your real IP, so it cannot prove there is no leak. See [docs/platforms.md](docs/platforms.md#leak-checks).
 - Geoveil does not change what your browser reports through its own APIs. A browser extension bridge is planned (phase 4).
 - VPN detection uses adapter names. An unusual VPN adapter name may not be recognized. Run `geoveil detect` to check.
 
