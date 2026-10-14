@@ -306,14 +306,14 @@ All requests use the normal system route. When your VPN carries the default rout
 
 | Phase | What | Status |
 |---|---|---|
-| 1 | Core, VPN detection, geolocation consensus, time zone and locale on 3 OSes, CLI | Implemented (on `main`, not released yet) |
-| 2 | Linux geoclue location backend | Implemented (on `main`, not released yet) |
+| 1 | Core, VPN detection, geolocation consensus, time zone and locale on 3 OSes, CLI | Released in v0.1.0 |
+| 2 | Linux geoclue location backend | Released in v0.1.0 |
 | 3 | Windows location via a virtual NMEA serial port | Not pursued |
 | 4 | Browser extension bridge (native messaging, push the profile to the browser) | Not pursued |
-| 5 | Leak checks (DNS, IPv6, WebRTC/STUN): `geoveil leaks` | Implemented (not released yet) |
+| 5 | Leak checks (DNS, IPv6, WebRTC/STUN): `geoveil leaks` | Released in v0.1.0 |
 | 6 | Windows GNSS sensor driver (UMDF) | Not pursued |
 | 7 | macOS expert mode (real location spoofing) | Not pursued; macOS location stays block-only |
-| 8 | Tray UI talking to the daemon over local IPC, start at login, release builds | Implemented (not released yet) |
+| 8 | Tray UI talking to the daemon over local IPC, start at login, release builds | Released in v0.1.0 |
 
 ## Project layout
 

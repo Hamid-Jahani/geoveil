@@ -9,8 +9,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [0.1.0] - 2026-10-14
 
-Nothing has been released yet. The workspace version is `0.1.0`. This section
-describes phases 1, 2, 5 and 8 of [docs/design.md](docs/design.md).
+First release. Covers phases 1, 2, 5 and 8 of [docs/design.md](docs/design.md).
+Binaries are not code-signed.
 
 ### Added
 
