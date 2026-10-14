@@ -3,6 +3,7 @@
 //! everywhere. Only [`default_backends`] picks the set for the host OS.
 
 pub mod interfaces;
+pub mod leaks;
 pub mod linux;
 pub mod macos;
 pub mod runner;

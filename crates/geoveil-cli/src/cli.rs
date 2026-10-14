@@ -52,6 +52,8 @@ pub enum Command {
     Status,
     /// Daemon: follow the VPN up / down / exit changes automatically.
     Run(RunArgs),
+    /// Check whether the VPN leaks (IPv6, WebRTC/STUN, DNS). Changes nothing.
+    Leaks(crate::leaks_cmd::LeaksArgs),
 }
 
 /// Arguments for `apply`.
