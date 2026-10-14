@@ -52,7 +52,13 @@ Exact commands, files and caveats for each OS are in [docs/platforms.md](docs/pl
 
 Tagged releases on the [Releases page](https://github.com/Hamid-Jahani/geoveil/releases) carry one archive per platform (Windows x86_64, Linux x86_64, macOS Intel and Apple Silicon). Each holds `geoveil` and `geoveil-tray`, and `SHA256SUMS` lists the checksums.
 
-**The binaries are not code-signed.** Windows SmartScreen may warn ("Windows protected your PC": choose More info, then Run anyway). macOS Gatekeeper blocks files downloaded with a browser until you allow them in System Settings > Privacy & Security, or remove the quarantine flag with `xattr -d com.apple.quarantine geoveil geoveil-tray`. Check the archive against `SHA256SUMS`, or build from source.
+**The binaries are not code-signed.** Windows SmartScreen may warn ("Windows protected your PC": choose More info, then Run anyway). macOS Gatekeeper blocks files downloaded with a browser until you allow them in System Settings > Privacy & Security, or remove the quarantine flag with `xattr -d com.apple.quarantine geoveil geoveil-tray`. Check the archive against `SHA256SUMS`, or build from source. See the [Code signing policy](#code-signing-policy).
+
+Every archive from v0.1.1 on also carries a GitHub build attestation, which proves it was built by this repository's release workflow from the tagged source:
+
+```sh
+gh attestation verify geoveil-v0.1.1-x86_64-pc-windows-msvc.zip --repo Hamid-Jahani/geoveil
+```
 
 ### Requirements
 
@@ -285,6 +291,20 @@ ip-api.com's free tier only supports plain **HTTP**. When the VPN carries your t
 All requests use the normal system route. When your VPN carries the default route, they go through the VPN, so the services see the VPN exit IP, not your real one. Requests carry a `geoveil/<version>` User-Agent.
 
 `apply --lat/--lon` makes no network requests at all. `status` makes none either. `apply --ip X` sends X to the four geolocation services and skips the public IP lookup.
+
+## Code signing policy
+
+Windows release binaries are built and signed only by the automated release workflow ([`.github/workflows/release.yml`](.github/workflows/release.yml)) from the tagged source in this repository. Nothing is signed from a developer machine. Signing through the SignPath Foundation's free open-source program has been applied for; until it is approved, the binaries are unsigned.
+
+- **Authors (committers):** [Hamid-Jahani](https://github.com/Hamid-Jahani)
+- **Reviewers:** [Hamid-Jahani](https://github.com/Hamid-Jahani). All changes reach `main` through pull requests that must pass CI on Windows, Linux and macOS.
+- **Approvers:** [Hamid-Jahani](https://github.com/Hamid-Jahani). Every signing request is approved manually.
+
+All team members use multi-factor authentication for GitHub and the signing service.
+
+**Privacy:** Geoveil sends no telemetry. It contacts only the services listed under [Privacy](#privacy), and only for the commands described there; `apply --lat/--lon` and `status` make no network requests.
+
+**System changes:** Geoveil changes the time zone, and with `--locale` / `--location` the region and location settings, only when you run `apply` or `run` (or start the tray, which runs `run`). It saves your original settings first and restores them with `geoveil restore`, when the VPN goes down, or when the daemon stops. To remove Geoveil, run `geoveil restore` and `geoveil autostart disable`, then delete the binaries and the state directory listed under [Safety](#safety).
 
 ## Limitations
 
