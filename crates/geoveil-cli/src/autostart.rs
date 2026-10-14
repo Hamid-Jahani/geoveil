@@ -144,9 +144,11 @@ impl Autostart {
     pub fn disable(&self) -> Result<AutostartStatus> {
         match &self.platform {
             Platform::Windows => {
-                let out = self.run("reg", &["delete", RUN_KEY, "/v", VALUE_NAME, "/f"])?;
-                // Exit code 1 with "unable to find" just means it was not registered.
-                if !out.success() && !is_reg_not_found(&out) {
+                // Decide from `reg query`'s exit code alone: its "not found"
+                // message is translated on non-English Windows.
+                let query = self.run("reg", &["query", RUN_KEY, "/v", VALUE_NAME])?;
+                if query.success() {
+                    let out = self.run("reg", &["delete", RUN_KEY, "/v", VALUE_NAME, "/f"])?;
                     check(&out, "reg delete")?;
                 }
             }
@@ -174,6 +176,24 @@ impl Autostart {
             }
         }
         self.status()
+    }
+
+    /// What a tray-started daemon cannot do on this platform: the tray (and
+    /// the login entry) always starts `geoveil run` as the user, and both
+    /// IPC ends refuse a daemon running as another user (root).
+    pub fn privilege_warning(&self) -> Option<&'static str> {
+        match self.platform {
+            Platform::Windows => None,
+            Platform::Linux { .. } => Some(
+                "the tray starts `geoveil run` as your user: the time zone and locale change only if polkit \
+                 allows your user, and --location (files in /etc) needs root, which the tray cannot drive",
+            ),
+            Platform::Macos { .. } => Some(
+                "the tray starts `geoveil run` as your user: on macOS the time zone and location need root, \
+                 so a tray-started daemon can only change your locale (--locale); the tray cannot control a \
+                 daemon started with sudo",
+            ),
+        }
     }
 
     /// Reads the current registration. Changes nothing.
@@ -235,11 +255,6 @@ fn check(out: &CommandOutput, what: &str) -> Result<()> {
     }
     let msg = if out.stderr.trim().is_empty() { out.stdout.trim() } else { out.stderr.trim() };
     bail!("{what} failed (exit {}): {msg}", out.status)
-}
-
-/// `reg delete` / `reg query` output for a missing value.
-fn is_reg_not_found(out: &CommandOutput) -> bool {
-    out.status == 1 && format!("{}{}", out.stdout, out.stderr).to_ascii_lowercase().contains("unable to find")
 }
 
 /// Checks that `path` can be written into a registry value, unit file or
@@ -396,6 +411,7 @@ pub fn merged_options(existing: DaemonOptions, cli: &Cli) -> DaemonOptions {
 pub async fn run(cli: &Cli, args: &AutostartArgs) -> Result<Exit> {
     let autostart = Autostart::for_host(Arc::new(SystemRunner))?;
     let json = cli.json;
+    let warning = matches!(args.action, AutostartAction::Enable { .. }).then(|| autostart.privilege_warning()).flatten();
     let (status, saved) = match &args.action {
         AutostartAction::Enable { tray_path } => {
             let tray = match tray_path {
@@ -421,6 +437,7 @@ pub async fn run(cli: &Cli, args: &AutostartArgs) -> Result<Exit> {
     let value = serde_json::json!({
         "autostart": &status,
         "daemon_options": saved.as_ref().map(|(p, o)| serde_json::json!({ "file": p.display().to_string(), "options": o })),
+        "warning": warning,
     });
     emit(json, &value, || {
         let mut s = format!(
@@ -438,6 +455,9 @@ pub async fn run(cli: &Cli, args: &AutostartArgs) -> Result<Exit> {
         if let Some((path, o)) = &saved {
             let args: Vec<String> = o.run_args().iter().map(|a| a.to_string_lossy().into_owned()).collect();
             s.push_str(&format!("the tray starts `geoveil {}` when no daemon runs (saved in {})\n", args.join(" "), path.display()));
+        }
+        if let Some(w) = warning {
+            s.push_str(&format!("warning:   {w}\n"));
         }
         s
     });
@@ -527,20 +547,45 @@ mod tests {
     }
 
     #[test]
-    fn windows_disable_tolerates_missing_value() {
+    fn windows_disable_tolerates_missing_value_in_any_language() {
+        // German Windows: the message is translated, only the exit code counts.
+        let missing = "FEHLER: Der angegebene Registrierungsschlüssel bzw. Wert wurde nicht gefunden.\r\n";
         let fake = Arc::new(FakeRunner::new());
-        fake.push(out(1, "", "ERROR: The system was unable to find the specified registry key or value.\r\n"));
-        fake.push(out(1, "", "ERROR: The system was unable to find the specified registry key or value.\r\n"));
+        fake.push(out(1, "", missing));
+        fake.push(out(1, "", missing));
         let status = windows(&fake).disable().unwrap();
         assert!(!status.enabled);
-        assert_eq!(fake.calls()[0], format!(r"reg delete {RUN_KEY} /v Geoveil /f"));
+        let query = format!(r"reg query {RUN_KEY} /v Geoveil");
+        assert_eq!(fake.calls(), [query.clone(), query], "no delete when nothing is registered");
+    }
+
+    #[test]
+    fn windows_disable_deletes_registered_value() {
+        let fake = Arc::new(FakeRunner::new());
+        fake.push_stdout(REG_QUERY);
+        fake.push_stdout("The operation completed successfully.\r\n");
+        fake.push(out(1, "", "ERROR: not found\r\n"));
+        let status = windows(&fake).disable().unwrap();
+        assert!(!status.enabled);
+        assert_eq!(fake.calls()[1], format!(r"reg delete {RUN_KEY} /v Geoveil /f"));
     }
 
     #[test]
     fn windows_disable_reports_other_errors() {
         let fake = Arc::new(FakeRunner::new());
+        fake.push_stdout(REG_QUERY);
         fake.push(out(1, "", "ERROR: Access is denied.\r\n"));
         assert!(windows(&fake).disable().is_err());
+    }
+
+    #[test]
+    fn privilege_warning_per_platform() {
+        let fake = Arc::new(FakeRunner::new());
+        assert_eq!(windows(&fake).privilege_warning(), None);
+        let mac = Autostart::new(fake.clone(), Platform::Macos { agents_dir: PathBuf::from("x") });
+        assert!(mac.privilege_warning().unwrap().contains("time zone"));
+        let linux = Autostart::new(fake.clone(), Platform::Linux { unit_dir: PathBuf::from("x") });
+        assert!(linux.privilege_warning().unwrap().contains("polkit"));
     }
 
     #[test]
