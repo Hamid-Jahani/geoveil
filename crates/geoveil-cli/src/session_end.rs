@@ -9,22 +9,33 @@
 //! because Windows may end the process right after. This module carries that
 //! handshake:
 //!
-//! 1. the watcher calls [`StopRequester::request_and_wait`], which sends a
-//!    [`StopRequest`] and blocks;
+//! 1. the watcher calls [`StopRequester::request_and_wait_pumping`], which
+//!    sends a [`StopRequest`] and waits;
 //! 2. the daemon receives it through [`StopReceiver::recv`], stops, restores
 //!    the original settings, then calls [`StopRequest::ack`];
 //! 3. the watcher wakes up with [`StopOutcome::Acknowledged`], or with
 //!    [`StopOutcome::TimedOut`] / [`StopOutcome::DaemonGone`].
 //!
+//! A window thread must keep handling messages that other threads *send* to
+//! it while it waits: the restore itself (`tzutil`, `Set-Culture`) notifies
+//! every top-level window with `WM_SETTINGCHANGE` / `WM_TIMECHANGE`, and each
+//! sender would otherwise stall until its timeout. So the watcher waits with
+//! [`StopRequester::request_and_wait_pumping`], which checks for the
+//! acknowledgement in slices of at most [`PUMP_SLICE`] and calls a `pump`
+//! function between checks (on Windows: dispatch sent messages).
+//!
 //! Everything here is plain channels, so it is compiled and tested on every OS.
 
-use std::sync::mpsc::{sync_channel, Receiver, RecvTimeoutError, SyncSender};
-use std::time::Duration;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TryRecvError};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// How long the session-end watcher waits for the daemon to restore before
 /// letting the sign-out or shutdown continue anyway.
 pub const RESTORE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Longest time a pumping wait goes without checking for the acknowledgement.
+pub const PUMP_SLICE: Duration = Duration::from_millis(50);
 
 /// A request for the daemon to stop and restore the original settings.
 ///
@@ -66,21 +77,45 @@ pub struct StopRequester {
 
 impl StopRequester {
     /// Ask the daemon to stop and block until it acknowledges, `timeout`
-    /// passes, or the daemon turns out to be gone.
+    /// passes, or the daemon turns out to be gone. Tests only: the real
+    /// watcher must keep handling messages, see
+    /// [`request_and_wait_pumping`](Self::request_and_wait_pumping).
+    #[cfg(test)]
     pub fn request_and_wait(&self, reason: &'static str, timeout: Duration) -> StopOutcome {
+        self.request_and_wait_pumping(reason, timeout, std::thread::sleep)
+    }
+
+    /// Ask the daemon to stop and wait until it acknowledges, `timeout`
+    /// passes, or the daemon turns out to be gone, calling `pump(max)`
+    /// between checks; `pump` may block for up to `max` (at most
+    /// [`PUMP_SLICE`]) and should return early when it has work to do.
+    pub fn request_and_wait_pumping(
+        &self,
+        reason: &'static str,
+        timeout: Duration,
+        pump: impl FnMut(Duration),
+    ) -> StopOutcome {
         let (done, wait) = sync_channel(1);
         if self.tx.send(StopRequest { reason, done }).is_err() {
             return StopOutcome::DaemonGone;
         }
-        wait_for_ack(&wait, timeout)
+        wait_for_ack_pumping(&wait, timeout, pump)
     }
 }
 
-fn wait_for_ack(wait: &Receiver<()>, timeout: Duration) -> StopOutcome {
-    match wait.recv_timeout(timeout) {
-        Ok(()) => StopOutcome::Acknowledged,
-        Err(RecvTimeoutError::Timeout) => StopOutcome::TimedOut,
-        Err(RecvTimeoutError::Disconnected) => StopOutcome::DaemonGone,
+fn wait_for_ack_pumping(wait: &Receiver<()>, timeout: Duration, mut pump: impl FnMut(Duration)) -> StopOutcome {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match wait.try_recv() {
+            Ok(()) => return StopOutcome::Acknowledged,
+            Err(TryRecvError::Disconnected) => return StopOutcome::DaemonGone,
+            Err(TryRecvError::Empty) => {}
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return StopOutcome::TimedOut;
+        }
+        pump(left.min(PUMP_SLICE));
     }
 }
 
@@ -125,12 +160,20 @@ pub fn session_end_reason(logoff: bool) -> &'static str {
 
 /// What the watcher does when the session really ends (`ending` true) or a
 /// pending end was cancelled (`ending` false): only a real end stops the
-/// daemon. Returns the outcome, or `None` when nothing was requested.
-pub fn on_session_end(requester: &StopRequester, ending: bool, logoff: bool, timeout: Duration) -> Option<StopOutcome> {
+/// daemon. While waiting it calls `pump` (see
+/// [`StopRequester::request_and_wait_pumping`]). Returns the outcome, or
+/// `None` when nothing was requested.
+pub fn on_session_end(
+    requester: &StopRequester,
+    ending: bool,
+    logoff: bool,
+    timeout: Duration,
+    pump: impl FnMut(Duration),
+) -> Option<StopOutcome> {
     if !ending {
         return None;
     }
-    Some(requester.request_and_wait(session_end_reason(logoff), timeout))
+    Some(requester.request_and_wait_pumping(session_end_reason(logoff), timeout, pump))
 }
 
 #[cfg(test)]
@@ -157,7 +200,7 @@ mod tests {
         let seen = Arc::clone(&restored);
         // The watcher is a plain OS thread, like the Windows window thread.
         let outcome = tokio::task::spawn_blocking(move || {
-            let outcome = on_session_end(&requester, true, true, Duration::from_secs(5));
+            let outcome = on_session_end(&requester, true, true, Duration::from_secs(5), std::thread::sleep);
             // The restore finished before the watcher was released.
             (outcome, seen.load(Ordering::SeqCst))
         })
@@ -235,8 +278,51 @@ mod tests {
     #[test]
     fn cancelled_session_end_does_not_stop() {
         let (requester, mut rx) = channel();
-        assert_eq!(on_session_end(&requester, false, false, Duration::from_secs(5)), None);
+        let mut pumped = 0;
+        assert_eq!(on_session_end(&requester, false, false, Duration::from_secs(5), |_| pumped += 1), None);
         assert!(rx.rx.try_recv().is_err(), "no request sent");
+        assert_eq!(pumped, 0);
+    }
+
+    #[tokio::test]
+    async fn pumping_wait_keeps_pumping_until_ack() {
+        let (requester, mut rx) = channel();
+        let watcher = std::thread::spawn(move || {
+            let mut slices = Vec::new();
+            let outcome = requester.request_and_wait_pumping("x", Duration::from_secs(10), |max| {
+                slices.push(max);
+                std::thread::sleep(max);
+            });
+            (outcome, slices)
+        });
+        let req = rx.recv().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        req.ack();
+        let (outcome, slices) = watcher.join().unwrap();
+        assert_eq!(outcome, StopOutcome::Acknowledged);
+        assert!(slices.len() >= 2, "pumped while waiting: {slices:?}");
+        assert!(slices.iter().all(|s| *s <= PUMP_SLICE));
+    }
+
+    #[test]
+    fn pumping_wait_times_out_and_detects_gone_daemon() {
+        let (requester, mut rx) = channel();
+        let start = Instant::now();
+        let outcome = requester.request_and_wait_pumping("x", Duration::from_millis(120), std::thread::sleep);
+        assert_eq!(outcome, StopOutcome::TimedOut);
+        assert!(start.elapsed() >= Duration::from_millis(120));
+        drop(rx.rx.try_recv().unwrap());
+
+        // The request is dropped unanswered while the watcher pumps.
+        let (requester, rx) = channel();
+        let dropper = std::thread::spawn(move || {
+            let mut rx = rx;
+            std::thread::sleep(Duration::from_millis(30));
+            drop(rx.rx.try_recv().unwrap());
+        });
+        let outcome = requester.request_and_wait_pumping("x", Duration::from_secs(10), std::thread::sleep);
+        dropper.join().unwrap();
+        assert_eq!(outcome, StopOutcome::DaemonGone);
     }
 
     #[test]

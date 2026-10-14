@@ -10,10 +10,13 @@
 //! - `WM_QUERYENDSESSION`: register a shutdown block reason ("Geoveil is
 //!   restoring your settings") and allow the session to end (`TRUE`).
 //! - `WM_ENDSESSION` with `wParam` `TRUE`: ask the daemon to stop and restore
-//!   through [`crate::session_end`], block until it acknowledges or
+//!   through [`crate::session_end`], wait until it acknowledges or
 //!   [`RESTORE_TIMEOUT`] passes, then remove the block reason. Windows may end
 //!   the process as soon as this message returns, so the restore must be done
-//!   by then.
+//!   by then. While waiting, messages other threads send to this window are
+//!   still handled ([`pump_sent_messages`]): the restore broadcasts
+//!   `WM_SETTINGCHANGE` / `WM_TIMECHANGE`, and a window that does not answer
+//!   would stall each broadcast until its timeout.
 //! - `WM_ENDSESSION` with `wParam` `FALSE` (sign-out cancelled): remove the
 //!   block reason and keep running.
 //!
@@ -27,9 +30,11 @@ use std::io;
 use windows_sys::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Shutdown::{ShutdownBlockReasonCreate, ShutdownBlockReasonDestroy};
+use std::time::Duration;
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, PostQuitMessage, RegisterClassExW, TranslateMessage,
-    ENDSESSION_LOGOFF, MSG, WM_DESTROY, WM_ENDSESSION, WM_QUERYENDSESSION, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW,
+    PostQuitMessage, RegisterClassExW, TranslateMessage, ENDSESSION_LOGOFF, MSG, PM_NOREMOVE, PM_QS_SENDMESSAGE,
+    QS_SENDMESSAGE, WM_DESTROY, WM_ENDSESSION, WM_QUERYENDSESSION, WNDCLASSEXW, WS_EX_TOOLWINDOW, WS_OVERLAPPED,
 };
 
 /// Window class of the hidden watcher window.
@@ -128,6 +133,21 @@ fn message_loop() {
     }
 }
 
+/// Waits up to `max` for a message sent to this thread's windows, then lets
+/// Windows deliver every pending sent message to the window procedure.
+/// Posted messages stay queued for the main loop.
+fn pump_sent_messages(max: Duration) {
+    let ms = u32::try_from(max.as_millis()).unwrap_or(u32::MAX);
+    let mut msg = MSG::default();
+    // SAFETY: no handles are passed (count 0, null array); `msg` is a valid,
+    // writable MSG. PeekMessageW dispatches incoming sent messages itself,
+    // and PM_NOREMOVE leaves any posted message where it is.
+    unsafe {
+        MsgWaitForMultipleObjectsEx(0, std::ptr::null(), ms, QS_SENDMESSAGE, 0);
+        PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE | PM_QS_SENDMESSAGE);
+    }
+}
+
 /// Whether a `WM_QUERYENDSESSION` / `WM_ENDSESSION` `lParam` means only the
 /// user is signing out (not a shutdown or restart).
 fn is_logoff(lparam: LPARAM) -> bool {
@@ -149,7 +169,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let ending = wparam != 0;
             let requester = REQUESTER.with(|r| r.borrow().clone());
             if let Some(requester) = requester {
-                match on_session_end(&requester, ending, is_logoff(lparam), RESTORE_TIMEOUT) {
+                match on_session_end(&requester, ending, is_logoff(lparam), RESTORE_TIMEOUT, pump_sent_messages) {
                     None => tracing::debug!("sign-out / shutdown cancelled; still running"),
                     Some(StopOutcome::Acknowledged) => tracing::debug!("daemon stopped; letting the session end"),
                     Some(StopOutcome::TimedOut) => tracing::warn!(
@@ -177,8 +197,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 mod tests {
     use super::*;
     use crate::session_end::channel;
-    use std::time::Duration;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_CLOSE};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SendMessageW, WM_CLOSE, WM_SETTINGCHANGE};
 
     /// Send a message to the watcher window from a plain thread and wait.
     fn send(hwnd: isize, msg: u32, wparam: WPARAM, lparam: LPARAM) -> std::thread::JoinHandle<LRESULT> {
@@ -209,6 +228,15 @@ mod tests {
         assert_eq!(req.reason, "user sign-out");
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!reply.is_finished(), "WM_ENDSESSION returned before the ack");
+        // While the restore runs, a setting-change notification sent to the
+        // window must still be answered (tzutil / Set-Culture broadcast it).
+        let notify = send(hwnd, WM_SETTINGCHANGE, 0, 0);
+        let start = std::time::Instant::now();
+        while !notify.is_finished() && start.elapsed() < Duration::from_secs(5) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(notify.is_finished(), "a sent message was not handled during the wait");
+        assert!(!reply.is_finished(), "still waiting for the ack");
         req.ack();
         assert_eq!(reply.join().unwrap(), 0);
         send(hwnd, WM_CLOSE, 0, 0).join().unwrap();
