@@ -1,0 +1,40 @@
+[package]
+name = "geoveil-tray"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# tray-icon 0.26 needs Rust 1.90; the rest of the workspace stays at 1.88.
+rust-version = "1.90"
+description = "System tray front end for the geoveil daemon."
+
+[[bin]]
+name = "geoveil-tray"
+path = "src/main.rs"
+
+[dependencies]
+geoveil-ipc.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+dirs.workspace = true
+# No default features: they would pull in GTK on Linux.
+muda = { version = "0.21.2", default-features = false }
+tray-icon = { version = "0.26.1", default-features = false }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+
+# Ctrl-Break to a started daemon on Quit when it does not answer over IPC.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+
+# Windows and macOS need a native event loop on the main thread.
+[target.'cfg(any(target_os = "windows", target_os = "macos"))'.dependencies]
+tao = { version = "0.37.1", default-features = false }
+
+# Linux/BSD: the KSNI (StatusNotifierItem over D-Bus, pure Rust) backend needs
+# no GTK or appindicator libraries at build or run time, and no GUI event
+# loop. tao is not used there because its Linux backend is GTK.
+[target.'cfg(not(any(target_os = "windows", target_os = "macos")))'.dependencies]
+tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }

@@ -42,7 +42,7 @@ Out of scope:
 
 - Geoveil does not provide a VPN and does not change your IP address. Leaks
   from your VPN client itself (DNS, IPv6, WebRTC) are not Geoveil
-  vulnerabilities. Leak checks are a planned feature, not a current one.
+  vulnerabilities. `geoveil leaks` reports such leaks but does not fix them.
 - Websites detecting your real location by other means (for example browser
   fingerprinting) are a known limitation, not a vulnerability.
 - Wrong results from third-party geolocation providers.

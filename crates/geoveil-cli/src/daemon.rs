@@ -11,11 +11,21 @@
 //! Orchestrator calls spawn OS processes, so they run on the blocking pool
 //! behind an `Arc<std::sync::Mutex<_>>`; the lock is never held across `.await`.
 //! The daemon holds the state-directory lock for its whole life, and stops
-//! (restoring originals unless `--sticky`) on Ctrl-C, SIGTERM/SIGHUP, or the
-//! Windows console close / logoff / shutdown events, even mid-poll.
+//! (restoring originals unless `--sticky`) on Ctrl-C, SIGTERM/SIGHUP, the
+//! Windows console close / logoff / shutdown events, or a Windows sign-out /
+//! shutdown seen by a hidden window (`shutdown_win`), even mid-poll. A
+//! sign-out / shutdown is held until the restore finishes (see `session_end`).
+//!
+//! The daemon also serves local IPC ([`crate::ipc`]): it publishes its status
+//! after every poll and runs `restore_now` / `pause` / `resume` / `shutdown`
+//! between polls. While paused it keeps watching the VPN (for the status)
+//! but neither engages nor restores.
 
 use crate::cli::RunArgs;
 use crate::commands::{list_interfaces_async, Ctx, Exit};
+use crate::ipc::{self, Control, ControlRequest, StatusParts};
+use crate::session_end::{StopReceiver, StopRequest};
+use geoveil_ipc::protocol::{DaemonStatus, ErrorBody, ErrorKind};
 use anyhow::{anyhow, Context, Result};
 use geoveil_core::geo::{self, IpGeoProvider, ResolveOptions};
 use geoveil_core::orchestrator::{Orchestrator, OrchestratorError, Report};
@@ -127,9 +137,95 @@ struct Daemon {
     resolved: Option<(IpAddr, Profile)>,
     /// When to retry a failed restore, and how many attempts failed so far.
     restore_retry: Option<(Instant, u32)>,
+    /// Following the VPN is paused (IPC `pause` / `restore_now`).
+    paused: bool,
+    /// Last engage / restore error, for the IPC status.
+    last_error: Option<String>,
+    /// VPN-like interfaces seen at the last poll.
+    vpn_interfaces: Vec<String>,
+    /// State directory, for the IPC status.
+    state_dir: String,
+    /// Where the IPC server reads the status from.
+    status_tx: tokio::sync::watch::Sender<DaemonStatus>,
+}
+
+/// What the loop does after an IPC command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterControl {
+    /// Keep the normal poll schedule.
+    Continue,
+    /// Poll right away (after `resume`).
+    PollNow,
+    /// Stop the daemon.
+    Stop(&'static str),
 }
 
 impl Daemon {
+    /// Publishes the current status for IPC clients and returns it.
+    async fn publish(&self) -> DaemonStatus {
+        let (engaged, profile) = with_orch(&self.orch, |o| (o.is_engaged(), o.current_profile().cloned()))
+            .await
+            .unwrap_or((false, None));
+        let status = ipc::build_status(StatusParts {
+            engaged,
+            paused: self.paused,
+            sticky: self.sticky,
+            profile,
+            vpn_up: self.detector.is_up(),
+            exit_ip: if self.detector.is_up() { self.detector.exit_ip() } else { None },
+            vpn_interfaces: self.vpn_interfaces.clone(),
+            last_error: self.last_error.clone(),
+            state_dir: self.state_dir.clone(),
+        });
+        self.status_tx.send_replace(status.clone());
+        status
+    }
+
+    /// Runs one IPC command and answers it with the resulting status.
+    async fn control(&mut self, req: ControlRequest) -> AfterControl {
+        let mut after = AfterControl::Continue;
+        let result: Result<(), String> = match req.control {
+            Control::Pause => {
+                tracing::info!("IPC: pausing; the VPN is still watched but settings are left as they are");
+                self.paused = true;
+                Ok(())
+            }
+            Control::Resume => {
+                tracing::info!("IPC: resuming");
+                self.paused = false;
+                self.retry = None;
+                self.restore_retry = None;
+                after = AfterControl::PollNow;
+                Ok(())
+            }
+            Control::RestoreNow => {
+                tracing::info!("IPC: restoring original settings now and pausing");
+                self.paused = true;
+                self.applied = None;
+                self.retry = None;
+                self.restore_retry = None;
+                match self.disengage().await {
+                    RestoreStatus::Restored | RestoreStatus::NothingToRestore => {
+                        self.last_error = None;
+                        Ok(())
+                    }
+                    RestoreStatus::Partial | RestoreStatus::Error => {
+                        let msg = "some original settings were not restored; see the daemon log".to_string();
+                        self.last_error = Some(msg.clone());
+                        Err(msg)
+                    }
+                }
+            }
+            Control::Shutdown => {
+                after = AfterControl::Stop("IPC shutdown request");
+                Ok(())
+            }
+        };
+        let status = self.publish().await;
+        let _ = req.reply.send(result.map(|()| status).map_err(|m| ErrorBody::new(ErrorKind::Failed, m)));
+        after
+    }
+
     /// One poll: interfaces, optional public-IP check, detector, reconcile.
     async fn tick(&mut self) {
         let ifaces = match list_interfaces_async().await {
@@ -153,8 +249,12 @@ impl Daemon {
         if let Some(event) = self.detector.observe(&ifaces, public_ip, Instant::now()) {
             self.on_event(event);
         }
-        let vpn_present = !VpnDetector::vpn_interfaces(&ifaces).is_empty();
-        self.reconcile(vpn_present).await;
+        self.vpn_interfaces = VpnDetector::vpn_interfaces(&ifaces);
+        let vpn_present = !self.vpn_interfaces.is_empty();
+        if !self.paused {
+            self.reconcile(vpn_present).await;
+        }
+        self.publish().await;
     }
 
     fn on_event(&mut self, event: VpnEvent) {
@@ -199,11 +299,13 @@ impl Daemon {
                 self.applied = Some(ip);
                 self.retry = None;
                 self.restore_retry = None;
+                self.last_error = None;
             }
             Err(e) => {
                 let attempt = self.retry.filter(|r| r.ip == ip).map_or(1, |r| r.attempt + 1);
                 let delay = retry_delay(attempt);
                 tracing::error!("engaging for exit {ip} incomplete: {e:#}; retrying in {}s", delay.as_secs());
+                self.last_error = Some(format!("engaging for exit {ip}: {e:#}"));
                 self.retry = Some(Retry { ip, at: Instant::now() + delay, attempt });
             }
         }
@@ -223,11 +325,15 @@ impl Daemon {
             return;
         }
         match self.disengage().await {
-            RestoreStatus::Restored | RestoreStatus::NothingToRestore => self.restore_retry = None,
+            RestoreStatus::Restored | RestoreStatus::NothingToRestore => {
+                self.restore_retry = None;
+                self.last_error = None;
+            }
             RestoreStatus::Partial | RestoreStatus::Error => {
                 let attempt = self.restore_retry.map_or(1, |(_, n)| n + 1);
                 let delay = retry_delay(attempt);
                 tracing::warn!("original settings not fully restored; retrying in {}s", delay.as_secs());
+                self.last_error = Some("original settings not fully restored; retrying".to_string());
                 self.restore_retry = Some((Instant::now() + delay, attempt));
             }
         }
@@ -338,6 +444,8 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
     let lock = ctx.lock()?;
     tracing::debug!(lock = %lock.path().display(), "holding the state lock");
     let orch: SharedOrch = Arc::new(Mutex::new(ctx.orchestrator()?));
+    let (status_tx, status_rx) = tokio::sync::watch::channel(DaemonStatus::default());
+    let (control_tx, mut controls) = tokio::sync::mpsc::channel::<ControlRequest>(8);
     let mut daemon = Daemon {
         orch,
         detector: VpnDetector::new(DetectorConfig::default()),
@@ -348,7 +456,14 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
         retry: None,
         resolved: None,
         restore_retry: None,
+        paused: false,
+        last_error: None,
+        vpn_interfaces: Vec::new(),
+        state_dir: ctx.state_dir().display().to_string(),
+        status_tx,
     };
+    daemon.publish().await;
+    let ipc_server = ipc::start(ipc::DaemonHandle::new(status_rx, control_tx)).await;
 
     let mut stop_reason = None;
     tokio::select! {
@@ -370,6 +485,14 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
             tokio::select! {
                 _ = interval.tick() => {}
                 why = shutdown.recv() => break why,
+                Some(req) = controls.recv() => {
+                    match daemon.control(req).await {
+                        AfterControl::Continue => {}
+                        AfterControl::PollNow => interval.reset_immediately(),
+                        AfterControl::Stop(why) => break why,
+                    }
+                    continue;
+                }
             }
             tokio::select! {
                 _ = daemon.tick() => {}
@@ -379,15 +502,23 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
         stop_reason = Some(why);
     }
     let why = stop_reason.unwrap_or("stop request");
+    // Stop taking IPC commands before the final restore.
+    if let Some(server) = ipc_server {
+        server.stop().await;
+    }
+    drop(controls);
 
     if daemon.sticky {
         tracing::warn!("{why}: stopping; --sticky set, leaving spoofed settings in place (run `geoveil restore` to undo)");
         drop(lock);
+        shutdown.acknowledge();
         return Ok(Exit::Ok);
     }
     tracing::info!("{why}: stopping; restoring original settings");
     let status = daemon.disengage().await;
     drop(lock);
+    // Only now may a Windows sign-out / shutdown continue.
+    shutdown.acknowledge();
     let exit = exit_for(status);
     if exit != Exit::Ok {
         eprintln!("error: some original settings were not restored; the snapshot is kept, run `geoveil restore` again");
@@ -395,9 +526,82 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
     Ok(exit)
 }
 
-/// Termination requests the daemon reacts to. Handlers are registered when
-/// this is created; a handler that cannot be registered is logged and skipped.
+/// Termination requests the daemon reacts to: OS signals / console events,
+/// plus (Windows) session-end requests from the hidden window, which wait for
+/// [`Shutdown::acknowledge`] after the final restore.
 struct Shutdown {
+    signals: Signals,
+    session_end: Option<StopReceiver>,
+    /// The session-end request that stopped the daemon, acked after restore.
+    pending_ack: Option<StopRequest>,
+}
+
+impl Shutdown {
+    fn register() -> Self {
+        Self::with_session_end(Signals::register(), session_end_watcher())
+    }
+
+    fn with_session_end(signals: Signals, session_end: Option<StopReceiver>) -> Self {
+        Self { signals, session_end, pending_ack: None }
+    }
+
+    /// Resolves with the name of the first termination request.
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            req = next_session_end(&mut self.session_end) => {
+                let why = req.reason;
+                self.pending_ack = Some(req);
+                why
+            }
+            why = self.signals.recv() => why,
+        }
+    }
+
+    /// Release any session-end watcher waiting for the restore to finish.
+    fn acknowledge(&mut self) {
+        if let Some(req) = self.pending_ack.take() {
+            req.ack();
+        }
+        if let Some(rx) = self.session_end.as_mut() {
+            rx.ack_pending();
+        }
+    }
+}
+
+/// The next session-end request; never resolves without a watcher.
+async fn next_session_end(rx: &mut Option<StopReceiver>) -> StopRequest {
+    if let Some(r) = rx.as_mut() {
+        if let Some(req) = r.recv().await {
+            return req;
+        }
+        // The watcher is gone; stop polling it.
+        *rx = None;
+    }
+    std::future::pending().await
+}
+
+/// Starts the Windows sign-out / shutdown watcher (a hidden window), because
+/// console logoff / shutdown events are not delivered once user32 is loaded.
+#[cfg(windows)]
+fn session_end_watcher() -> Option<StopReceiver> {
+    let (requester, receiver) = crate::session_end::channel();
+    match crate::shutdown_win::spawn(requester) {
+        Ok(()) => Some(receiver),
+        Err(e) => {
+            tracing::warn!("cannot watch for sign-out / shutdown: {e}; settings may not be restored at sign-out");
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn session_end_watcher() -> Option<StopReceiver> {
+    None
+}
+
+/// OS termination signals and console events. Handlers are registered when
+/// this is created; a handler that cannot be registered is logged and skipped.
+struct Signals {
     #[cfg(unix)]
     signals: Vec<(&'static str, tokio::signal::unix::Signal)>,
     #[cfg(windows)]
@@ -431,7 +635,7 @@ async fn recv_or_pending<F: std::future::Future<Output = Option<()>>>(fut: Optio
     }
 }
 
-impl Shutdown {
+impl Signals {
     #[cfg(unix)]
     fn register() -> Self {
         use tokio::signal::unix::{signal, SignalKind};
@@ -592,5 +796,42 @@ mod tests {
         let mut s = Shutdown::register();
         let r = tokio::time::timeout(Duration::from_millis(50), s.recv()).await;
         assert!(r.is_err(), "no termination request was sent");
+    }
+
+    #[tokio::test]
+    async fn session_end_stops_daemon_and_waits_for_ack() {
+        let (requester, rx) = crate::session_end::channel();
+        let mut s = Shutdown::with_session_end(Signals::register(), Some(rx));
+        let watcher = std::thread::spawn(move || requester.request_and_wait("user sign-out", Duration::from_secs(5)));
+        let why = tokio::time::timeout(Duration::from_secs(5), s.recv()).await.expect("stop request delivered");
+        assert_eq!(why, "user sign-out");
+        // Not released before the daemon acknowledges (i.e. finished restoring).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!watcher.is_finished(), "watcher released before the restore");
+        s.acknowledge();
+        assert_eq!(watcher.join().unwrap(), crate::session_end::StopOutcome::Acknowledged);
+    }
+
+    #[tokio::test]
+    async fn closed_session_end_watcher_is_ignored() {
+        let (requester, rx) = crate::session_end::channel();
+        drop(requester);
+        let mut s = Shutdown::with_session_end(Signals::register(), Some(rx));
+        let r = tokio::time::timeout(Duration::from_millis(50), s.recv()).await;
+        assert!(r.is_err(), "a closed watcher is not a stop request");
+        s.acknowledge(); // nothing pending: no-op
+    }
+
+    #[tokio::test]
+    async fn dropping_shutdown_releases_waiting_watcher() {
+        // A daemon that exits early (e.g. the state lock is taken) must not
+        // hold a sign-out for the full timeout.
+        let (requester, rx) = crate::session_end::channel();
+        let s = Shutdown::with_session_end(Signals::register(), Some(rx));
+        drop(s);
+        assert_eq!(
+            requester.request_and_wait("system shutdown", Duration::from_secs(5)),
+            crate::session_end::StopOutcome::DaemonGone
+        );
     }
 }

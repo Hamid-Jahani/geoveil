@@ -5,7 +5,8 @@
 Geoveil makes your operating system's time zone, locale and location match your VPN exit.
 
 > Status: early (version 0.1.0). Time zone and locale work on Windows, Linux and macOS.
-> Location works on Linux (geoclue) and is block-only on macOS. Windows location is planned.
+> Location works on Linux (geoclue) and is block-only on macOS. Windows location is not spoofed.
+> A tray app (`geoveil-tray`), start at login and a read-only leak check (`geoveil leaks`) are available.
 
 ## Why
 
@@ -27,9 +28,9 @@ Geoveil does **not** provide a VPN and does **not** change your IP. You keep usi
 
 | OS | Time zone | Locale (opt-in, `--locale`) | Location (opt-in, `--location`) |
 |---|---|---|---|
-| Windows | Yes: `tzutil` | Yes: `Set-Culture`, `Set-WinHomeLocation` (per user) | Planned (phase 3, phase 6) |
+| Windows | Yes: `tzutil` | Yes: `Set-Culture`, `Set-WinHomeLocation` (per user) | No (not planned) |
 | Linux | Yes: `timedatectl` | Yes: `localectl` (new sessions only) | Yes: geoclue static source (geoclue 2.7 or newer) |
-| macOS | Yes: `systemsetup` | Yes: `defaults -g AppleLocale` | Block only: turns Location Services off. Real spoofing is planned (phase 7) |
+| macOS | Yes: `systemsetup` | Yes: `defaults -g AppleLocale` | Block only: turns Location Services off |
 
 The time zone is always changed. Locale and location are only changed when you pass `--locale` or `--location`.
 
@@ -47,11 +48,15 @@ Exact commands, files and caveats for each OS are in [docs/platforms.md](docs/pl
 
 ## Install
 
-There are no prebuilt binaries yet. Build from source.
+### Prebuilt binaries
+
+Tagged releases on the [Releases page](https://github.com/Hamid-Jahani/geoveil/releases) carry one archive per platform (Windows x86_64, Linux x86_64, macOS Intel and Apple Silicon). Each holds `geoveil` and `geoveil-tray`, and `SHA256SUMS` lists the checksums.
+
+**The binaries are not code-signed.** Windows SmartScreen may warn ("Windows protected your PC": choose More info, then Run anyway). macOS Gatekeeper blocks files downloaded with a browser until you allow them in System Settings > Privacy & Security, or remove the quarantine flag with `xattr -d com.apple.quarantine geoveil geoveil-tray`. Check the archive against `SHA256SUMS`, or build from source.
 
 ### Requirements
 
-- Rust stable, 1.88 or newer ([rustup.rs](https://rustup.rs)).
+- Rust stable, 1.88 or newer ([rustup.rs](https://rustup.rs)). The tray app (`geoveil-tray`) needs 1.90 or newer.
 - A C compiler and linker for your platform (one dependency, `ring`, compiles C code):
   - **Windows:** Microsoft C++ Build Tools ("Desktop development with C++" workload), or Visual Studio with that workload.
   - **Linux:** `gcc` or `clang` (for example `sudo apt install build-essential` on Debian/Ubuntu).
@@ -62,15 +67,16 @@ There are no prebuilt binaries yet. Build from source.
 ```sh
 git clone https://github.com/Hamid-Jahani/geoveil.git
 cd geoveil
-cargo build --release
+cargo build --release --workspace    # geoveil and geoveil-tray (Rust 1.90 or newer)
+cargo build --release                # geoveil only (Rust 1.88 or newer)
 ```
 
-The binary is:
+The binaries are:
 
-- `target/release/geoveil` on Linux and macOS,
-- `target\release\geoveil.exe` on Windows.
+- `target/release/geoveil` and `target/release/geoveil-tray` on Linux and macOS,
+- `target\release\geoveil.exe` and `target\release\geoveil-tray.exe` on Windows.
 
-Copy it somewhere on your `PATH` if you like.
+Copy them somewhere on your `PATH` if you like. Keep both in the same directory: the tray looks for `geoveil` next to itself first.
 
 ## Quick start
 
@@ -119,10 +125,70 @@ The daemon checks the interfaces every 5 seconds (`--interval-secs N`). It also 
 - VPN exit changes: it applies the new profile. The original settings saved the first time are kept.
 - VPN goes down: it restores the original settings.
 - You press Ctrl-C, or the process gets SIGTERM/SIGHUP (Linux, macOS) or a console close, logoff or shutdown event (Windows): it restores and exits.
+- You sign out of Windows or shut it down: a hidden window asks Windows to wait ("Geoveil is restoring your settings") and the daemon restores before it lets the sign-out continue, for at most 20 seconds. This also works for a daemon started by the tray, which has no console. Details: [docs/platforms.md](docs/platforms.md#sign-out-and-shutdown-geoveil-run).
 
 If an apply or restore fails, the daemon retries after 30 seconds, then doubles the wait each time, up to 10 minutes.
 
 `--sticky` keeps the spoofed settings when the VPN goes down or the daemon stops. It only warns. Your real location can then leak while the VPN is off. Run `geoveil restore` to undo.
+
+### Tray app
+
+`geoveil-tray` puts an icon in the system tray (menu bar on macOS). Its menu shows:
+
+- the status (engaged, paused, watching with no VPN, daemon not running, or an error),
+- the applied country, time zone and locale,
+- **Pause** / **Resume following the VPN**: while paused the daemon leaves the settings as they are,
+- **Restore original settings now**: restores and pauses, so the next poll does not re-apply; Resume engages again,
+- **Open log folder**,
+- **Quit**: if the tray started the daemon, Quit stops it too, which restores your settings (unless `--sticky`).
+
+The icon is grey when your real settings are in place, green when engaged, amber when paused and red on an error.
+
+The tray talks to `geoveil run` over a local connection that only your user account can open: a named pipe on Windows (`\\.\pipe\geoveil-<your SID>`, access limited to your account, remote clients rejected) and a Unix socket elsewhere (`$XDG_RUNTIME_DIR/geoveil/geoveil.sock` on Linux, else `~/.local/share/geoveil/run/geoveil.sock`; `~/Library/Application Support/geoveil/run/geoveil.sock` on macOS; `/var/run/geoveil/geoveil.sock` for a daemon running as root). The socket has mode 0600, and its folder, used for nothing else, is set to 0700 each time the daemon starts. Both sides refuse a peer that runs as another user. If no daemon answers, the tray starts `geoveil run` itself, in the background, with the options saved by `geoveil autostart enable` (pass `--no-start-daemon` to prevent that). The daemon's output goes to `geoveil.log` in the log folder (`%LOCALAPPDATA%\geoveil\logs`, `~/.local/share/geoveil/logs`, `~/Library/Application Support/geoveil/logs`).
+
+On Linux the tray uses the StatusNotifierItem protocol (KDE, and GNOME with the AppIndicator extension, which Ubuntu ships). It needs no GTK. Stock GNOME without the extension shows no tray icon; `geoveil run` works without it.
+
+**The tray's daemon runs as you, not as root.** Because both sides refuse a peer of another user, the tray cannot control a daemon started with `sudo`. So a daemon started by the tray (or at login) can only change what your user may change:
+
+- **macOS:** only the locale (`--locale`). The time zone and location need root, so every engage reports them as "needs elevated privileges". To follow the VPN with the time zone, run `sudo geoveil run` yourself instead of the tray.
+- **Linux:** the time zone and locale change only if polkit allows your user (many desktops ask for a password or refuse in the background). `--location` writes files in `/etc` and needs root.
+- **Windows:** the time zone and locale work; only turning off "Set time zone automatically" needs admin, as with `geoveil run`.
+
+### Start at login
+
+```sh
+geoveil --locale autostart enable    # start geoveil-tray at login; it runs `geoveil run --locale`
+geoveil autostart status
+geoveil autostart disable
+```
+
+`enable` registers `geoveil-tray` (next to `geoveil`, or `--tray-path PATH`) for your user only. No admin rights and no system service are involved:
+
+| OS | Entry |
+|---|---|
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Geoveil` (written with `reg.exe`). `status` also notices when you turned it off in Task Manager. |
+| Linux | `~/.config/systemd/user/geoveil-tray.service`, enabled with `systemctl --user enable` (started with `graphical-session.target`). Desktops without systemd session integration (XFCE, MATE, Cinnamon, i3 and other plain window managers) never reach that target, so the tray does not start there although `status` says "enabled"; add `geoveil-tray --autostart` to the desktop's own startup programs instead. |
+| macOS | `~/Library/LaunchAgents/io.geoveil.tray.plist`, loaded by launchd at the next login. |
+
+`enable` also saves `--locale`, `--location` and `--state-dir` in `daemon.json` in the geoveil config folder (`%APPDATA%\geoveil`, `~/.config/geoveil`, `~/Library/Application Support/geoveil`). The tray passes them to the daemon it starts. You can also set `sticky`, `interval_secs` and `geoveil_path` there by hand.
+
+### Check for leaks
+
+```sh
+geoveil leaks                 # changes nothing, needs no admin rights
+geoveil leaks --active-dns    # also run Mullvad's DNS leak test (opt-in)
+geoveil --json leaks          # machine-readable report
+```
+
+`leaks` checks whether information escapes the VPN and prints one line per check (`PASS`, `INFO`, `N/A`, `WARN`, `LEAK` or `ERROR`):
+
+- **vpn:** the VPN interfaces found and the exit IP.
+- **ipv6:** asks IPv6-only endpoints which address they see. A non-VPN IPv6 address of this machine while a VPN is up is a leak.
+- **webrtc:** sends STUN requests over the default route and from each physical interface with a gateway, as a browser's WebRTC would. An answer that is not the VPN exit is a leak. If no request could be bound to a physical interface (on Linux before kernel 5.7 that needs root), or no STUN server could be reached at all, the result is `ERROR`, never `PASS`.
+- **dns:** lists the configured resolvers per interface. A public resolver on a non-VPN interface while a VPN is up is a leak when a STUN request from that interface also reached the internet outside the tunnel; if it is only configured (your VPN's kill switch may block it), it is a warning. A LAN resolver is a warning. On macOS only the default resolvers count, not the "scoped" ones. With `--active-dns`, Mullvad's test shows which resolvers really answered.
+- **verify:** while a profile is engaged, the usual verify results.
+
+`--no-ipv6`, `--no-stun` and `--stun HOST:PORT` (repeatable) skip or redirect probes. Exit code 3 means at least one leak was found. The report lists every host it contacted. Details per OS: [docs/platforms.md](docs/platforms.md#leak-checks).
 
 ### Choose the location yourself
 
@@ -146,7 +212,7 @@ These work with every command, before or after the command name.
 | Option | Meaning |
 |---|---|
 | `--locale` | Also change the system locale / region formats. Off by default. |
-| `--location` | Also drive the OS location service (Linux: geoclue; macOS: turn Location Services off; Windows: not yet available, a warning is printed). |
+| `--location` | Also drive the OS location service (Linux: geoclue; macOS: turn Location Services off; Windows: not available, a warning is printed). |
 | `--json` | Print JSON on stdout (`run` only logs). Logs stay on stderr. |
 | `--state-dir PATH` | Where the state file and lock file live. See [Safety](#safety). |
 | `--provider-timeout-secs N` | Timeout for each public-IP and geolocation request, 1 to 120 seconds. Default 5. |
@@ -161,6 +227,7 @@ These work with every command, before or after the command name.
 | 0 | Success. `restore` with nothing to restore also returns 0. |
 | 1 | Error (for example no geolocation consensus, or another Geoveil holds the lock). |
 | 2 | Partial: some settings were applied or restored, others failed. |
+| 3 | `leaks` found at least one leak. |
 
 ## Privileges
 
@@ -211,6 +278,7 @@ Geoveil sends no telemetry. The only network requests are:
 
 - **Public IP lookup:** `https://api.ipify.org`, `https://icanhazip.com`, `https://ifconfig.me/ip`.
 - **IP geolocation:** `https://ipwho.is`, `https://ipapi.co`, `http://ip-api.com`, `https://ipinfo.io` (free endpoints, no API key). The IP being located is part of the request URL.
+- **`geoveil leaks` only:** `https://api6.ipify.org`, `https://ipv6.icanhazip.com`, and STUN over UDP to `stun.l.google.com:19302` and `stun.cloudflare.com:3478` (or your `--stun` servers). With `--active-dns` also `https://am.i.mullvad.net` and `https://<random>.dnsleak.am.i.mullvad.net`. The report lists every host it contacted.
 
 ip-api.com's free tier only supports plain **HTTP**. When the VPN carries your traffic, the request goes through the tunnel, but it is not encrypted between the VPN exit and ip-api.com.
 
@@ -220,16 +288,18 @@ All requests use the normal system route. When your VPN carries the default rout
 
 ## Limitations
 
-- Windows location is not spoofed yet. `--location` on Windows prints a warning and does nothing.
-- macOS location is only blocked, not spoofed: Location Services is turned off. On recent macOS versions, System Integrity Protection (SIP) may keep this from taking effect until a reboot, or at all.
+- Windows location is not spoofed, and no Windows location backend is planned. `--location` on Windows prints a warning and does nothing.
+- On Windows, a sign-out or shutdown waits at most 20 seconds for the restore. If the restore does not finish in time, the snapshot is kept: run `geoveil restore` after the next sign-in. `geoveil status` shows whether a snapshot is left.
+- macOS location is only blocked, not spoofed: Location Services is turned off. Real spoofing on macOS is not planned. On recent macOS versions, System Integrity Protection (SIP) may keep this from taking effect until a reboot, or at all.
 - Linux location only affects apps that use geoclue (GNOME, KDE, Firefox with the geoclue provider, and so on). It needs geoclue 2.7 or newer.
 - Linux locale changes only affect sessions started after the change. Log out and back in.
 - On Linux, `localectl` refuses locales that are not installed. Geoveil checks `locale -a` first and tells you how to install the missing one.
 - Running apps may need a restart to see a new locale (Windows, macOS).
 - Windows locale changes the regional format and home location only. The input language list (keyboard layouts) is never touched.
 - Some countries have no known Windows GeoID in the built-in table. Then only the regional format is changed.
-- No leak checks yet. DNS, IPv6 and WebRTC leaks are not detected (planned, phase 5).
-- Geoveil does not change what your browser reports through its own APIs. A browser extension bridge is planned (phase 4).
+- `geoveil leaks` detects DNS, IPv6 and WebRTC leaks but does not fix them. With a VPN on your router or a proxy, this machine cannot see your real IP, so it cannot prove there is no leak. See [docs/platforms.md](docs/platforms.md#leak-checks).
+- Geoveil does not change what your browser reports through its own APIs (for example the browser geolocation API or WebRTC). No browser extension bridge is planned. `geoveil leaks` shows what WebRTC would expose.
+- `geoveil status` reads the state file; it does not ask a running daemon over IPC yet (the tray does).
 - VPN detection uses adapter names. An unusual VPN adapter name may not be recognized. Run `geoveil detect` to check.
 
 ## Roadmap
@@ -238,22 +308,25 @@ All requests use the normal system route. When your VPN carries the default rout
 |---|---|---|
 | 1 | Core, VPN detection, geolocation consensus, time zone and locale on 3 OSes, CLI | Implemented (on `main`, not released yet) |
 | 2 | Linux geoclue location backend | Implemented (on `main`, not released yet) |
-| 3 | Windows location via a virtual NMEA serial port | Planned |
-| 4 | Browser extension bridge (native messaging, push the profile to the browser) | Planned |
-| 5 | Leak checks (DNS, IPv6, WebRTC/STUN) | Planned |
-| 6 | Windows GNSS sensor driver (UMDF) | Planned |
-| 7 | macOS expert mode (real location spoofing) | Planned |
-| 8 | Tray UI (Tauri) talking to the daemon | Planned |
+| 3 | Windows location via a virtual NMEA serial port | Not pursued |
+| 4 | Browser extension bridge (native messaging, push the profile to the browser) | Not pursued |
+| 5 | Leak checks (DNS, IPv6, WebRTC/STUN): `geoveil leaks` | Implemented (not released yet) |
+| 6 | Windows GNSS sensor driver (UMDF) | Not pursued |
+| 7 | macOS expert mode (real location spoofing) | Not pursued; macOS location stays block-only |
+| 8 | Tray UI talking to the daemon over local IPC, start at login, release builds | Implemented (not released yet) |
 
 ## Project layout
 
 ```text
 crates/
   geoveil-core      pure logic, no OS calls: profile, VPN detection, IP geolocation and voting,
-                    offline time zone and locale lookup, orchestrator, snapshot store
+                    offline time zone and locale lookup, orchestrator, snapshot store,
+                    leak-check verdicts and STUN codec
   geoveil-platform  OS backends (Windows, Linux, macOS) behind one trait, interface listing,
-                    command runner
-  geoveil-cli       the `geoveil` binary: detect, apply, restore, status, run
+                    command runner, DNS resolver discovery and interface-bound STUN probes
+  geoveil-cli       the `geoveil` binary: detect, apply, restore, status, run, leaks, autostart
+  geoveil-ipc       local IPC between the daemon and the tray: protocol, per-user endpoint
+  geoveil-tray      the `geoveil-tray` binary: tray icon and menu
 docs/
   design.md         design and phases
   platforms.md      what each OS backend does, exactly
@@ -262,14 +335,14 @@ docs/
 ## Development
 
 ```sh
-cargo build --workspace
+cargo build --workspace      # --workspace includes the tray (Rust 1.90+)
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 Every OS backend is compiled and tested on every OS. Backends run external commands through a `CommandRunner` trait. Tests use a fake runner that records the exact commands, so they never change your system.
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs build, tests and clippy (warnings are errors) on Windows, Linux and macOS for every push and pull request.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs build, tests and clippy (warnings are errors) on Windows, Linux and macOS for every push and pull request. Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which tests and builds both binaries for each release target and publishes the archives with `SHA256SUMS` (unsigned).
 
 Please do not run `apply`, `run` or `restore` on a machine you care about while developing a backend. Use the tests, or a virtual machine.
 

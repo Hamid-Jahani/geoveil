@@ -1,7 +1,8 @@
 # Geoveil — system-wide location consistency with your VPN
 
 Date: 2026-10-14
-Status: approved (phases 1 and 2 implemented on `main`, not released yet)
+Status: approved (phases 1, 2, 5 and 8 implemented, not released yet;
+phases 3, 4 and 6 are not being pursued; phase 7 stays block-only)
 
 ## Goal
 
@@ -27,7 +28,11 @@ crates/
   geoveil-cli       `geoveil` binary: daemon + one-shot commands
 ```
 
-A Tauri tray UI comes in a later phase. It talks to the daemon over local IPC.
+Phase 8 adds `geoveil-ipc` (local IPC: versioned JSON lines over a per-user
+named pipe or Unix socket) and `geoveil-tray` (a tray icon built with
+`tray-icon` / `muda`, no webview). The tray is a thin client of `geoveil run`
+and starts it when none answers. See the README for the menu and
+`geoveil autostart`.
 
 ### Core types
 
@@ -77,7 +82,7 @@ Exit IP → `Profile`:
 |---|---|---|---|
 | Timezone | `tzutil /s` with IANA→Windows ID map (CLDR windowsZones, embedded) | `timedatectl set-timezone` | `systemsetup -settimezone` |
 | Locale (opt-in) | `Set-Culture`, `Set-WinHomeLocation` (per-user) | `localectl set-locale` | `defaults write -g AppleLocale` |
-| Location | phase 3 (NMEA virtual port), phase 6 (UMDF driver) | geoclue static source `/etc/geolocation` + disable other sources in `/etc/geoclue/conf.d/` | Location Services off (block only); expert mode later |
+| Location | not spoofed (phases 3 and 6 are not being pursued) | geoclue static source `/etc/geolocation` + disable other sources in `/etc/geoclue/conf.d/` | Location Services off (block only) |
 
 All backends shell out via a `CommandRunner` trait so they are testable with a
 fake runner that records the commands it would run.
@@ -90,8 +95,18 @@ geoveil apply [--lat --lon | --ip X] [--locale]   engage once
 geoveil restore           restore snapshot
 geoveil status            current state + verify report
 geoveil run [--locale]    daemon: follow VPN up/down/changed automatically
-geoveil leaks             phase 5
+geoveil leaks [--json] [--active-dns]   IPv6 / WebRTC (STUN) / DNS leak report; changes nothing
+geoveil autostart enable|disable|status start geoveil-tray at login (per user)
 ```
+
+`geoveil leaks` keeps its pure logic (STUN codec, verdict rules, report) in
+`geoveil-core::leaks` and its OS probes (interfaces, resolver discovery,
+interface-bound UDP sockets) in `geoveil-platform::leaks`. Exit code 3 means
+a leak was found. Details are in `docs/platforms.md` ("Leak checks").
+
+On Windows, `geoveil run` also owns a hidden top-level window that answers
+`WM_QUERYENDSESSION` / `WM_ENDSESSION`, so a sign-out or shutdown waits (up
+to 20 s) for the final restore (`session_end`, `shutdown_win`).
 
 ## Error handling
 
@@ -112,9 +127,9 @@ geoveil leaks             phase 5
 
 1. Core + VPN detect + geo resolve + timezone/locale backends on 3 OSes + CLI  ← implemented
 2. Linux geoclue location backend                                            ← implemented
-3. Windows NMEA virtual-port location backend
-4. Browser extension bridge (native messaging, push Profile)
-5. Leak checks (DNS, IPv6, WebRTC/STUN)
-6. Windows UMDF GNSS sensor driver
-7. macOS expert mode
-8. Tauri tray UI
+3. Windows NMEA virtual-port location backend                               ← not pursued
+4. Browser extension bridge (native messaging, push Profile)                 ← not pursued
+5. Leak checks (DNS, IPv6, WebRTC/STUN)                                      ← implemented
+6. Windows UMDF GNSS sensor driver                                           ← not pursued
+7. macOS expert mode                       ← not pursued; macOS location stays block-only
+8. Tray UI + IPC + start at login + release builds                          ← implemented

@@ -2,6 +2,7 @@
 
 pub mod backend;
 pub mod geo;
+pub mod leaks;
 pub mod locale;
 pub mod orchestrator;
 pub mod snapshot;

@@ -30,6 +30,8 @@ pub enum Exit {
     Partial,
     /// The command failed and has already reported why (exit code 1).
     Failed,
+    /// `leaks` found at least one leak (exit code 3).
+    Leaks,
 }
 
 impl Exit {
@@ -49,6 +51,7 @@ impl From<Exit> for ExitCode {
             Exit::Ok => ExitCode::SUCCESS,
             Exit::Partial => ExitCode::from(2),
             Exit::Failed => ExitCode::FAILURE,
+            Exit::Leaks => ExitCode::from(3),
         }
     }
 }
