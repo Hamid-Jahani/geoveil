@@ -57,7 +57,9 @@ Notes:
 |---|---|
 | `crates/geoveil-core` | Pure logic, no OS calls: types, geolocation consensus, timezone and locale tables, VPN detection, orchestrator, snapshot store. |
 | `crates/geoveil-platform` | OS backends (Windows, Linux, macOS), interface enumeration, `CommandRunner`. |
-| `crates/geoveil-cli` | The `geoveil` binary: CLI parsing, one-shot commands, daemon, state directory and lock. |
+| `crates/geoveil-cli` | The `geoveil` binary: CLI parsing, one-shot commands, daemon and its IPC server, autostart, state directory and lock. |
+| `crates/geoveil-ipc` | Local IPC between the daemon and the tray: JSON-lines protocol, per-user endpoint (named pipe / Unix socket), peer checks, saved daemon options. |
+| `crates/geoveil-tray` | The `geoveil-tray` binary (Rust 1.90 or newer, the rest stays at 1.88). Menu logic lives in pure functions (`model.rs`, `worker.rs`) with tests; `app.rs` only wires them to `tray-icon` / `muda` (and `tao` on Windows and macOS; Linux uses the KSNI backend, no GTK). |
 
 ## Safety rule for your own machine
 

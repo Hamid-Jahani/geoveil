@@ -6,6 +6,7 @@ Geoveil makes your operating system's time zone, locale and location match your 
 
 > Status: early (version 0.1.0). Time zone and locale work on Windows, Linux and macOS.
 > Location works on Linux (geoclue) and is block-only on macOS. Windows location is planned.
+> A tray app (`geoveil-tray`) and start at login are available.
 
 ## Why
 
@@ -47,11 +48,15 @@ Exact commands, files and caveats for each OS are in [docs/platforms.md](docs/pl
 
 ## Install
 
-There are no prebuilt binaries yet. Build from source.
+### Prebuilt binaries
+
+Tagged releases on the [Releases page](https://github.com/Hamid-Jahani/geoveil/releases) carry one archive per platform (Windows x86_64, Linux x86_64, macOS Intel and Apple Silicon). Each holds `geoveil` and `geoveil-tray`, and `SHA256SUMS` lists the checksums.
+
+**The binaries are not code-signed.** Windows SmartScreen may warn ("Windows protected your PC": choose More info, then Run anyway). macOS Gatekeeper blocks files downloaded with a browser until you allow them in System Settings > Privacy & Security, or remove the quarantine flag with `xattr -d com.apple.quarantine geoveil geoveil-tray`. Check the archive against `SHA256SUMS`, or build from source.
 
 ### Requirements
 
-- Rust stable, 1.88 or newer ([rustup.rs](https://rustup.rs)).
+- Rust stable, 1.88 or newer ([rustup.rs](https://rustup.rs)). The tray app (`geoveil-tray`) needs 1.90 or newer.
 - A C compiler and linker for your platform (one dependency, `ring`, compiles C code):
   - **Windows:** Microsoft C++ Build Tools ("Desktop development with C++" workload), or Visual Studio with that workload.
   - **Linux:** `gcc` or `clang` (for example `sudo apt install build-essential` on Debian/Ubuntu).
@@ -65,12 +70,12 @@ cd geoveil
 cargo build --release
 ```
 
-The binary is:
+The binaries are:
 
-- `target/release/geoveil` on Linux and macOS,
-- `target\release\geoveil.exe` on Windows.
+- `target/release/geoveil` and `target/release/geoveil-tray` on Linux and macOS,
+- `target\release\geoveil.exe` and `target\release\geoveil-tray.exe` on Windows.
 
-Copy it somewhere on your `PATH` if you like.
+Copy them somewhere on your `PATH` if you like. Keep both in the same directory: the tray looks for `geoveil` next to itself first.
 
 ## Quick start
 
@@ -123,6 +128,41 @@ The daemon checks the interfaces every 5 seconds (`--interval-secs N`). It also 
 If an apply or restore fails, the daemon retries after 30 seconds, then doubles the wait each time, up to 10 minutes.
 
 `--sticky` keeps the spoofed settings when the VPN goes down or the daemon stops. It only warns. Your real location can then leak while the VPN is off. Run `geoveil restore` to undo.
+
+### Tray app
+
+`geoveil-tray` puts an icon in the system tray (menu bar on macOS). Its menu shows:
+
+- the status (engaged, paused, watching with no VPN, daemon not running, or an error),
+- the applied country, time zone and locale,
+- **Pause** / **Resume following the VPN**: while paused the daemon leaves the settings as they are,
+- **Restore original settings now**: restores and pauses, so the next poll does not re-apply; Resume engages again,
+- **Open log folder**,
+- **Quit**: if the tray started the daemon, Quit stops it too, which restores your settings (unless `--sticky`).
+
+The icon is grey when your real settings are in place, green when engaged, amber when paused and red on an error.
+
+The tray talks to `geoveil run` over a local connection that only your user account can open: a named pipe on Windows (`\\.\pipe\geoveil-<your SID>`, access limited to your account, remote clients rejected) and a Unix socket elsewhere (`$XDG_RUNTIME_DIR/geoveil.sock` on Linux, `~/Library/Application Support/geoveil/geoveil.sock` on macOS, mode 0600). Both sides refuse a peer that runs as another user. If no daemon answers, the tray starts `geoveil run` itself, in the background, with the options saved by `geoveil autostart enable` (pass `--no-start-daemon` to prevent that). The daemon's output goes to `geoveil.log` in the log folder (`%LOCALAPPDATA%\geoveil\logs`, `~/.local/share/geoveil/logs`, `~/Library/Application Support/geoveil/logs`).
+
+On Linux the tray uses the StatusNotifierItem protocol (KDE, and GNOME with the AppIndicator extension, which Ubuntu ships). It needs no GTK. Stock GNOME without the extension shows no tray icon; `geoveil run` works without it.
+
+### Start at login
+
+```sh
+geoveil --locale autostart enable    # start geoveil-tray at login; it runs `geoveil run --locale`
+geoveil autostart status
+geoveil autostart disable
+```
+
+`enable` registers `geoveil-tray` (next to `geoveil`, or `--tray-path PATH`) for your user only. No admin rights and no system service are involved:
+
+| OS | Entry |
+|---|---|
+| Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Geoveil` (written with `reg.exe`). `status` also notices when you turned it off in Task Manager. |
+| Linux | `~/.config/systemd/user/geoveil-tray.service`, enabled with `systemctl --user enable` (started with the graphical session). |
+| macOS | `~/Library/LaunchAgents/io.geoveil.tray.plist`, loaded by launchd at the next login. |
+
+`enable` also saves `--locale`, `--location` and `--state-dir` in `daemon.json` in the geoveil config folder (`%APPDATA%\geoveil`, `~/.config/geoveil`, `~/Library/Application Support/geoveil`). The tray passes them to the daemon it starts. You can also set `sticky`, `interval_secs` and `geoveil_path` there by hand.
 
 ### Choose the location yourself
 
@@ -223,6 +263,7 @@ All requests use the normal system route. When your VPN carries the default rout
 ## Limitations
 
 - Windows location is not spoofed yet. `--location` on Windows prints a warning and does nothing.
+- On Windows, signing out or shutting down may not restore your settings: Windows does not deliver its logoff and shutdown console events to processes that use the GUI libraries or run without a console window, which includes a daemon started by the tray. Use **Quit** or **Restore original settings now** first, or run `geoveil restore` after the next sign-in. A fix is planned.
 - macOS location is only blocked, not spoofed: Location Services is turned off. On recent macOS versions, System Integrity Protection (SIP) may keep this from taking effect until a reboot, or at all.
 - Linux location only affects apps that use geoclue (GNOME, KDE, Firefox with the geoclue provider, and so on). It needs geoclue 2.7 or newer.
 - Linux locale changes only affect sessions started after the change. Log out and back in.
@@ -245,7 +286,7 @@ All requests use the normal system route. When your VPN carries the default rout
 | 5 | Leak checks (DNS, IPv6, WebRTC/STUN) | Planned |
 | 6 | Windows GNSS sensor driver (UMDF) | Planned |
 | 7 | macOS expert mode (real location spoofing) | Planned |
-| 8 | Tray UI (Tauri) talking to the daemon | Planned |
+| 8 | Tray UI talking to the daemon over local IPC, start at login, release builds | Implemented (not released yet) |
 
 ## Project layout
 
@@ -255,7 +296,9 @@ crates/
                     offline time zone and locale lookup, orchestrator, snapshot store
   geoveil-platform  OS backends (Windows, Linux, macOS) behind one trait, interface listing,
                     command runner
-  geoveil-cli       the `geoveil` binary: detect, apply, restore, status, run
+  geoveil-cli       the `geoveil` binary: detect, apply, restore, status, run, autostart
+  geoveil-ipc       local IPC between the daemon and the tray: protocol, per-user endpoint
+  geoveil-tray      the `geoveil-tray` binary: tray icon and menu
 docs/
   design.md         design and phases
   platforms.md      what each OS backend does, exactly
@@ -271,7 +314,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 Every OS backend is compiled and tested on every OS. Backends run external commands through a `CommandRunner` trait. Tests use a fake runner that records the exact commands, so they never change your system.
 
-CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs build, tests and clippy (warnings are errors) on Windows, Linux and macOS for every push and pull request.
+CI ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs build, tests and clippy (warnings are errors) on Windows, Linux and macOS for every push and pull request. Pushing a `v*` tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml), which tests and builds both binaries for each release target and publishes the archives with `SHA256SUMS` (unsigned).
 
 Please do not run `apply`, `run` or `restore` on a machine you care about while developing a backend. Use the tests, or a virtual machine.
 

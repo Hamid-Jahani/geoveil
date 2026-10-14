@@ -359,3 +359,15 @@ When `apply` or `run` has engaged a profile, the orchestrator's verify results a
 ### Proxies
 
 The IPv6 probe and the active DNS test turn off `HTTP(S)_PROXY` (`no_proxy()`). Geoveil's reqwest build has no `system-proxy` feature, so the Windows registry proxy is never used. The exit IP lookup is the shared public-IP lookup, which honours `HTTP(S)_PROXY` environment variables.
+
+## Start at login (`geoveil autostart`)
+
+Per user only; no admin rights, no system service. The entry starts `geoveil-tray --autostart`.
+
+| OS | `enable` | `disable` | `status` |
+|---|---|---|---|
+| Windows | `reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Geoveil /t REG_SZ /d "\"<tray>\" --autostart" /f` | `reg delete ...\Run /v Geoveil /f` (a missing value is fine) | `reg query ...\Run /v Geoveil`, then `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run /v Geoveil` (first byte `03` = turned off in Task Manager) |
+| Linux | writes `$XDG_CONFIG_HOME/systemd/user/geoveil-tray.service` (`WantedBy=graphical-session.target`, `Restart=on-failure`), then `systemctl --user daemon-reload` and `systemctl --user enable geoveil-tray.service` | `systemctl --user disable geoveil-tray.service`, removes the file, `systemctl --user daemon-reload` | reads the file and `systemctl --user is-enabled geoveil-tray.service` |
+| macOS | writes `~/Library/LaunchAgents/io.geoveil.tray.plist` (`RunAtLoad`, restart only after a crash); launchd loads it at the next login | removes the file | reads the file |
+
+The tray path must be absolute and may not contain control characters or double quotes. It is quoted for the registry, escaped for systemd (`\`, `"`, `%`, `$`) and XML-escaped for the plist.

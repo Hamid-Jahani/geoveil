@@ -1,9 +1,11 @@
 //! `geoveil` binary: one-shot commands and the VPN-following daemon.
 
+mod autostart;
 mod cli;
 mod commands;
 mod daemon;
 mod leaks_cmd;
+mod ipc;
 mod lock;
 mod output;
 mod paths;
@@ -47,6 +49,7 @@ async fn dispatch(cli: Cli) -> anyhow::Result<commands::Exit> {
         Command::Status => commands::status(&ctx).await,
         Command::Run(args) => daemon::run(&ctx, args).await,
         Command::Leaks(args) => leaks_cmd::leaks(&ctx, args).await,
+        Command::Autostart(args) => autostart::run(&cli, args).await,
     }
 }
 

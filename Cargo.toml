@@ -1,6 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["crates/geoveil-core", "crates/geoveil-platform", "crates/geoveil-cli"]
+members = [
+    "crates/geoveil-core",
+    "crates/geoveil-platform",
+    "crates/geoveil-cli",
+    "crates/geoveil-ipc",
+    "crates/geoveil-tray",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,6 +17,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 geoveil-core = { path = "crates/geoveil-core" }
 geoveil-platform = { path = "crates/geoveil-platform" }
+geoveil-ipc = { path = "crates/geoveil-ipc" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

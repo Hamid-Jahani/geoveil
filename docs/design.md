@@ -27,7 +27,11 @@ crates/
   geoveil-cli       `geoveil` binary: daemon + one-shot commands
 ```
 
-A Tauri tray UI comes in a later phase. It talks to the daemon over local IPC.
+Phase 8 adds `geoveil-ipc` (local IPC: versioned JSON lines over a per-user
+named pipe or Unix socket) and `geoveil-tray` (a tray icon built with
+`tray-icon` / `muda`, no webview). The tray is a thin client of `geoveil run`
+and starts it when none answers. See the README for the menu and
+`geoveil autostart`.
 
 ### Core types
 
@@ -117,4 +121,4 @@ geoveil leaks             phase 5
 5. Leak checks (DNS, IPv6, WebRTC/STUN)
 6. Windows UMDF GNSS sensor driver
 7. macOS expert mode
-8. Tauri tray UI
+8. Tray UI + IPC + start at login + release builds                          ← implemented
