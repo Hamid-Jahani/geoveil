@@ -60,7 +60,11 @@ Exit IP → `Profile`:
 - Query ≥3 providers concurrently (ipapi.co, ipwho.is, ip-api.com, ipinfo.io
   free endpoints), timeout 5 s each. Requests go out through the system route,
   which means through the VPN.
-- Majority vote on country; take lat/lon as the median of agreeing providers.
+- Majority vote on country among answers about the same IP (IPv4 preferred; answers
+  about different IPs are never pooled); take lat/lon from the medoid agreeing answer
+  (a point some provider actually reported, never a per-axis median/midpoint).
+- The public IP is found first (IPv4 only, falling back to any family) and every
+  provider then geolocates that exact IP.
 - Timezone from lat/lon using offline boundary data (`tzf-rs`), not trusting
   providers' tz strings (fallback to provider majority if lookup fails).
 - Locale from country via embedded table (primary language + country, e.g.
@@ -99,7 +103,7 @@ geoveil leaks             phase 5
 
 ## Testing
 
-- Core: unit tests (vote/median, tz lookup, locale map, vpn detection state
+- Core: unit tests (vote/medoid, tz lookup, locale map, vpn detection state
   machine, orchestrator with fake backends, snapshot round-trip).
 - Platform: unit tests with fake `CommandRunner` asserting exact commands per OS.
 - CI: GitHub Actions matrix windows/macos/ubuntu: `cargo test`, `cargo clippy`.
