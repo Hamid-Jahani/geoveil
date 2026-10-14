@@ -402,7 +402,7 @@ fn medoid(members: &[&ProviderAnswer]) -> Option<(f64, f64)> {
     let mut best: Option<(&ProviderAnswer, f64)> = None;
     for &a in members {
         let d = total(a);
-        if best.map_or(true, |(_, bd)| d < bd) {
+        if best.is_none_or(|(_, bd)| d < bd) {
             best = Some((a, d));
         }
     }
@@ -448,7 +448,7 @@ fn most_common(items: impl Iterator<Item = String>) -> Option<String> {
     let mut best: Option<(String, usize)> = None;
     for item in order {
         let n = counts.get(&item).copied().unwrap_or(0);
-        if best.as_ref().map_or(true, |(_, bn)| n > *bn) {
+        if best.as_ref().is_none_or(|(_, bn)| n > *bn) {
             best = Some((item, n));
         }
     }

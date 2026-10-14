@@ -88,7 +88,7 @@ pub fn should_restore(
     retry_at: Option<Instant>,
     now: Instant,
 ) -> bool {
-    !vpn_confirmed_up && !vpn_interface_present && !sticky && retry_at.map_or(true, |at| now >= at)
+    !vpn_confirmed_up && !vpn_interface_present && !sticky && retry_at.is_none_or(|at| now >= at)
 }
 
 /// How a restore attempt ended.
@@ -473,8 +473,8 @@ impl Shutdown {
         let futs: Vec<_> = self
             .signals
             .iter_mut()
-            .map(|(name, sig)| {
-                let name: &'static str = *name;
+            .map(|entry| {
+                let (name, sig) = (entry.0, &mut entry.1);
                 Box::pin(async move {
                     recv_or_pending(Some(sig.recv())).await;
                     name
