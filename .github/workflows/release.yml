@@ -1,0 +1,108 @@
+name: Release
+
+# Builds geoveil and geoveil-tray for each target when a version tag is
+# pushed, packs them with README, LICENSE and NOTICE, writes SHA256SUMS and
+# publishes a GitHub release. The binaries are NOT code-signed.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
+          # Oldest supported runner, for a low glibc baseline.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-15
+            archive: tar.gz
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      # Every runner builds for its own architecture, so the tests run too.
+      - name: Test
+        run: cargo test --workspace --locked --target ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p geoveil-cli -p geoveil-tray
+
+      - name: Package (tar.gz)
+        if: matrix.archive == 'tar.gz'
+        shell: bash
+        run: |
+          name="geoveil-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/geoveil" "target/${{ matrix.target }}/release/geoveil-tray" "$name/"
+          cp README.md LICENSE NOTICE "$name/"
+          tar -czf "$name.tar.gz" "$name"
+          echo "ASSET=$name.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Package (zip)
+        if: matrix.archive == 'zip'
+        shell: pwsh
+        run: |
+          $name = "geoveil-$env:GITHUB_REF_NAME-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $name | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/geoveil.exe", "target/${{ matrix.target }}/release/geoveil-tray.exe" -Destination $name
+          Copy-Item README.md, LICENSE, NOTICE -Destination $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+          "ASSET=$name.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  release:
+    name: publish
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- *.zip *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true
+          body: |
+            **These binaries are not code-signed.** Windows SmartScreen may show
+            "Windows protected your PC" (choose More info, then Run anyway), and
+            macOS Gatekeeper blocks browser downloads until you allow them in
+            System Settings > Privacy & Security (or run
+            `xattr -d com.apple.quarantine geoveil geoveil-tray`).
+            Check downloads against `SHA256SUMS`.
+
+            Each archive contains `geoveil` (CLI and daemon) and `geoveil-tray`
+            (tray app), plus README, LICENSE and NOTICE.
