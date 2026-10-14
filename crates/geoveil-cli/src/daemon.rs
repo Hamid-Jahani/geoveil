@@ -11,11 +11,14 @@
 //! Orchestrator calls spawn OS processes, so they run on the blocking pool
 //! behind an `Arc<std::sync::Mutex<_>>`; the lock is never held across `.await`.
 //! The daemon holds the state-directory lock for its whole life, and stops
-//! (restoring originals unless `--sticky`) on Ctrl-C, SIGTERM/SIGHUP, or the
-//! Windows console close / logoff / shutdown events, even mid-poll.
+//! (restoring originals unless `--sticky`) on Ctrl-C, SIGTERM/SIGHUP, the
+//! Windows console close / logoff / shutdown events, or a Windows sign-out /
+//! shutdown seen by a hidden window (`shutdown_win`), even mid-poll. A
+//! sign-out / shutdown is held until the restore finishes (see `session_end`).
 
 use crate::cli::RunArgs;
 use crate::commands::{list_interfaces_async, Ctx, Exit};
+use crate::session_end::{StopReceiver, StopRequest};
 use anyhow::{anyhow, Context, Result};
 use geoveil_core::geo::{self, IpGeoProvider, ResolveOptions};
 use geoveil_core::orchestrator::{Orchestrator, OrchestratorError, Report};
@@ -383,11 +386,14 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
     if daemon.sticky {
         tracing::warn!("{why}: stopping; --sticky set, leaving spoofed settings in place (run `geoveil restore` to undo)");
         drop(lock);
+        shutdown.acknowledge();
         return Ok(Exit::Ok);
     }
     tracing::info!("{why}: stopping; restoring original settings");
     let status = daemon.disengage().await;
     drop(lock);
+    // Only now may a Windows sign-out / shutdown continue.
+    shutdown.acknowledge();
     let exit = exit_for(status);
     if exit != Exit::Ok {
         eprintln!("error: some original settings were not restored; the snapshot is kept, run `geoveil restore` again");
@@ -395,9 +401,82 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
     Ok(exit)
 }
 
-/// Termination requests the daemon reacts to. Handlers are registered when
-/// this is created; a handler that cannot be registered is logged and skipped.
+/// Termination requests the daemon reacts to: OS signals / console events,
+/// plus (Windows) session-end requests from the hidden window, which wait for
+/// [`Shutdown::acknowledge`] after the final restore.
 struct Shutdown {
+    signals: Signals,
+    session_end: Option<StopReceiver>,
+    /// The session-end request that stopped the daemon, acked after restore.
+    pending_ack: Option<StopRequest>,
+}
+
+impl Shutdown {
+    fn register() -> Self {
+        Self::with_session_end(Signals::register(), session_end_watcher())
+    }
+
+    fn with_session_end(signals: Signals, session_end: Option<StopReceiver>) -> Self {
+        Self { signals, session_end, pending_ack: None }
+    }
+
+    /// Resolves with the name of the first termination request.
+    async fn recv(&mut self) -> &'static str {
+        tokio::select! {
+            req = next_session_end(&mut self.session_end) => {
+                let why = req.reason;
+                self.pending_ack = Some(req);
+                why
+            }
+            why = self.signals.recv() => why,
+        }
+    }
+
+    /// Release any session-end watcher waiting for the restore to finish.
+    fn acknowledge(&mut self) {
+        if let Some(req) = self.pending_ack.take() {
+            req.ack();
+        }
+        if let Some(rx) = self.session_end.as_mut() {
+            rx.ack_pending();
+        }
+    }
+}
+
+/// The next session-end request; never resolves without a watcher.
+async fn next_session_end(rx: &mut Option<StopReceiver>) -> StopRequest {
+    if let Some(r) = rx.as_mut() {
+        if let Some(req) = r.recv().await {
+            return req;
+        }
+        // The watcher is gone; stop polling it.
+        *rx = None;
+    }
+    std::future::pending().await
+}
+
+/// Starts the Windows sign-out / shutdown watcher (a hidden window), because
+/// console logoff / shutdown events are not delivered once user32 is loaded.
+#[cfg(windows)]
+fn session_end_watcher() -> Option<StopReceiver> {
+    let (requester, receiver) = crate::session_end::channel();
+    match crate::shutdown_win::spawn(requester) {
+        Ok(()) => Some(receiver),
+        Err(e) => {
+            tracing::warn!("cannot watch for sign-out / shutdown: {e}; settings may not be restored at sign-out");
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn session_end_watcher() -> Option<StopReceiver> {
+    None
+}
+
+/// OS termination signals and console events. Handlers are registered when
+/// this is created; a handler that cannot be registered is logged and skipped.
+struct Signals {
     #[cfg(unix)]
     signals: Vec<(&'static str, tokio::signal::unix::Signal)>,
     #[cfg(windows)]
@@ -431,7 +510,7 @@ async fn recv_or_pending<F: std::future::Future<Output = Option<()>>>(fut: Optio
     }
 }
 
-impl Shutdown {
+impl Signals {
     #[cfg(unix)]
     fn register() -> Self {
         use tokio::signal::unix::{signal, SignalKind};
@@ -592,5 +671,42 @@ mod tests {
         let mut s = Shutdown::register();
         let r = tokio::time::timeout(Duration::from_millis(50), s.recv()).await;
         assert!(r.is_err(), "no termination request was sent");
+    }
+
+    #[tokio::test]
+    async fn session_end_stops_daemon_and_waits_for_ack() {
+        let (requester, rx) = crate::session_end::channel();
+        let mut s = Shutdown::with_session_end(Signals::register(), Some(rx));
+        let watcher = std::thread::spawn(move || requester.request_and_wait("user sign-out", Duration::from_secs(5)));
+        let why = tokio::time::timeout(Duration::from_secs(5), s.recv()).await.expect("stop request delivered");
+        assert_eq!(why, "user sign-out");
+        // Not released before the daemon acknowledges (i.e. finished restoring).
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!watcher.is_finished(), "watcher released before the restore");
+        s.acknowledge();
+        assert_eq!(watcher.join().unwrap(), crate::session_end::StopOutcome::Acknowledged);
+    }
+
+    #[tokio::test]
+    async fn closed_session_end_watcher_is_ignored() {
+        let (requester, rx) = crate::session_end::channel();
+        drop(requester);
+        let mut s = Shutdown::with_session_end(Signals::register(), Some(rx));
+        let r = tokio::time::timeout(Duration::from_millis(50), s.recv()).await;
+        assert!(r.is_err(), "a closed watcher is not a stop request");
+        s.acknowledge(); // nothing pending: no-op
+    }
+
+    #[tokio::test]
+    async fn dropping_shutdown_releases_waiting_watcher() {
+        // A daemon that exits early (e.g. the state lock is taken) must not
+        // hold a sign-out for the full timeout.
+        let (requester, rx) = crate::session_end::channel();
+        let s = Shutdown::with_session_end(Signals::register(), Some(rx));
+        drop(s);
+        assert_eq!(
+            requester.request_and_wait("system shutdown", Duration::from_secs(5)),
+            crate::session_end::StopOutcome::DaemonGone
+        );
     }
 }

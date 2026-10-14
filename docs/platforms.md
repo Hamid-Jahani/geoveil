@@ -74,6 +74,26 @@ Snapshot data example:
 {"culture": "en-US", "geo_id": 244, "international": {"sShortDate": "yyyy-MM-dd"}}
 ```
 
+### Sign-out and shutdown (`geoveil run`)
+
+Windows does not call a console program's `CTRL_LOGOFF_EVENT` / `CTRL_SHUTDOWN_EVENT` handlers once it has loaded `user32` or `gdi32`, and `geoveil.exe` does. So `geoveil run` also creates a hidden top-level window on its own thread (`crates/geoveil-cli/src/shutdown_win.rs`):
+
+- `WM_QUERYENDSESSION`: Geoveil registers the block reason "Geoveil is restoring your settings" and lets the sign-out or shutdown go ahead.
+- `WM_ENDSESSION` (session really ending): the daemon is told to stop. The window waits until the original settings are restored, or 20 seconds pass, then removes the block reason. While it waits, Windows may show "Geoveil is restoring your settings" on the sign-out screen.
+- If the sign-out is cancelled, nothing is stopped.
+- With `--sticky`, the daemon stops without restoring, as on Ctrl-C.
+- Ctrl-C, Ctrl-Break, closing the console window and the console logoff / shutdown events are still handled.
+- If the restore does not finish in 20 seconds, the snapshot is kept. Run `geoveil restore` after signing in again.
+
+Manual test (on a VM or a throwaway account, see CONTRIBUTING.md):
+
+1. Note the current zone: `tzutil /g`.
+2. Connect the VPN and start `geoveil run` in a console. Wait until the log says the profile was engaged, and check that `tzutil /g` now shows the VPN country's zone.
+3. Sign out (Start > account > Sign out) without stopping `geoveil run`. If Windows lists Geoveil as preventing sign-out, wait. Do not press "Sign out anyway".
+4. Sign back in and run `tzutil /g`. It must show the zone from step 1. `geoveil status` must say not engaged, with no saved state.
+5. Repeat steps 2 to 4 with a restart (Start > Power > Restart) instead of a sign-out.
+6. Repeat with `--locale` and check `(Get-Culture).Name` in PowerShell as well.
+
 ## Linux
 
 Backends: `timezone`, `locale` with `--locale`, `location` with `--location`.
