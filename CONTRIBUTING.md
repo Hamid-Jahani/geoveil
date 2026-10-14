@@ -8,8 +8,10 @@ architecture and the planned phases.
 
 ## Prerequisites
 
-Rust **1.88** or newer (`rust-version` in `Cargo.toml`). CI tests the latest
-stable.
+Rust **1.88** or newer (`rust-version` in `Cargo.toml`) for `geoveil`, and
+**1.90** or newer for `geoveil-tray`. A plain `cargo build` / `cargo test`
+skips the tray (`default-members`); `--workspace`, which the commands below
+and CI use, includes it. CI tests the latest stable.
 
 ### Windows
 

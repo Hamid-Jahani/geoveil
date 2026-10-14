@@ -7,6 +7,15 @@ members = [
     "crates/geoveil-ipc",
     "crates/geoveil-tray",
 ]
+# A plain `cargo build` / `cargo test` skips the tray, which needs Rust 1.90,
+# so the documented minimum (1.88) builds `geoveil`. CI, the release workflow
+# and the docs pass `--workspace` or `-p geoveil-tray` to include it.
+default-members = [
+    "crates/geoveil-core",
+    "crates/geoveil-platform",
+    "crates/geoveil-cli",
+    "crates/geoveil-ipc",
+]
 
 [workspace.package]
 version = "0.1.0"

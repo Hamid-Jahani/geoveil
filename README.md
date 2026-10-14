@@ -67,7 +67,8 @@ Tagged releases on the [Releases page](https://github.com/Hamid-Jahani/geoveil/r
 ```sh
 git clone https://github.com/Hamid-Jahani/geoveil.git
 cd geoveil
-cargo build --release
+cargo build --release --workspace    # geoveil and geoveil-tray (Rust 1.90 or newer)
+cargo build --release                # geoveil only (Rust 1.88 or newer)
 ```
 
 The binaries are:
@@ -143,9 +144,15 @@ If an apply or restore fails, the daemon retries after 30 seconds, then doubles 
 
 The icon is grey when your real settings are in place, green when engaged, amber when paused and red on an error.
 
-The tray talks to `geoveil run` over a local connection that only your user account can open: a named pipe on Windows (`\\.\pipe\geoveil-<your SID>`, access limited to your account, remote clients rejected) and a Unix socket elsewhere (`$XDG_RUNTIME_DIR/geoveil.sock` on Linux, `~/Library/Application Support/geoveil/geoveil.sock` on macOS, mode 0600). Both sides refuse a peer that runs as another user. If no daemon answers, the tray starts `geoveil run` itself, in the background, with the options saved by `geoveil autostart enable` (pass `--no-start-daemon` to prevent that). The daemon's output goes to `geoveil.log` in the log folder (`%LOCALAPPDATA%\geoveil\logs`, `~/.local/share/geoveil/logs`, `~/Library/Application Support/geoveil/logs`).
+The tray talks to `geoveil run` over a local connection that only your user account can open: a named pipe on Windows (`\\.\pipe\geoveil-<your SID>`, access limited to your account, remote clients rejected) and a Unix socket elsewhere (`$XDG_RUNTIME_DIR/geoveil/geoveil.sock` on Linux, else `~/.local/share/geoveil/run/geoveil.sock`; `~/Library/Application Support/geoveil/run/geoveil.sock` on macOS; `/var/run/geoveil/geoveil.sock` for a daemon running as root). The socket has mode 0600, and its folder, used for nothing else, is set to 0700 each time the daemon starts. Both sides refuse a peer that runs as another user. If no daemon answers, the tray starts `geoveil run` itself, in the background, with the options saved by `geoveil autostart enable` (pass `--no-start-daemon` to prevent that). The daemon's output goes to `geoveil.log` in the log folder (`%LOCALAPPDATA%\geoveil\logs`, `~/.local/share/geoveil/logs`, `~/Library/Application Support/geoveil/logs`).
 
 On Linux the tray uses the StatusNotifierItem protocol (KDE, and GNOME with the AppIndicator extension, which Ubuntu ships). It needs no GTK. Stock GNOME without the extension shows no tray icon; `geoveil run` works without it.
+
+**The tray's daemon runs as you, not as root.** Because both sides refuse a peer of another user, the tray cannot control a daemon started with `sudo`. So a daemon started by the tray (or at login) can only change what your user may change:
+
+- **macOS:** only the locale (`--locale`). The time zone and location need root, so every engage reports them as "needs elevated privileges". To follow the VPN with the time zone, run `sudo geoveil run` yourself instead of the tray.
+- **Linux:** the time zone and locale change only if polkit allows your user (many desktops ask for a password or refuse in the background). `--location` writes files in `/etc` and needs root.
+- **Windows:** the time zone and locale work; only turning off "Set time zone automatically" needs admin, as with `geoveil run`.
 
 ### Start at login
 
@@ -160,7 +167,7 @@ geoveil autostart disable
 | OS | Entry |
 |---|---|
 | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Geoveil` (written with `reg.exe`). `status` also notices when you turned it off in Task Manager. |
-| Linux | `~/.config/systemd/user/geoveil-tray.service`, enabled with `systemctl --user enable` (started with the graphical session). |
+| Linux | `~/.config/systemd/user/geoveil-tray.service`, enabled with `systemctl --user enable` (started with `graphical-session.target`). Desktops without systemd session integration (XFCE, MATE, Cinnamon, i3 and other plain window managers) never reach that target, so the tray does not start there although `status` says "enabled"; add `geoveil-tray --autostart` to the desktop's own startup programs instead. |
 | macOS | `~/Library/LaunchAgents/io.geoveil.tray.plist`, loaded by launchd at the next login. |
 
 `enable` also saves `--locale`, `--location` and `--state-dir` in `daemon.json` in the geoveil config folder (`%APPDATA%\geoveil`, `~/.config/geoveil`, `~/Library/Application Support/geoveil`). The tray passes them to the daemon it starts. You can also set `sticky`, `interval_secs` and `geoveil_path` there by hand.
@@ -177,8 +184,8 @@ geoveil --json leaks          # machine-readable report
 
 - **vpn:** the VPN interfaces found and the exit IP.
 - **ipv6:** asks IPv6-only endpoints which address they see. A non-VPN IPv6 address of this machine while a VPN is up is a leak.
-- **webrtc:** sends STUN requests over the default route and from each physical interface with a gateway, as a browser's WebRTC would. An answer that is not the VPN exit is a leak.
-- **dns:** lists the configured resolvers per interface. A public resolver on a non-VPN interface while a VPN is up is a leak; a LAN resolver is a warning. With `--active-dns`, Mullvad's test shows which resolvers really answered.
+- **webrtc:** sends STUN requests over the default route and from each physical interface with a gateway, as a browser's WebRTC would. An answer that is not the VPN exit is a leak. If no request could be bound to a physical interface (on Linux before kernel 5.7 that needs root), or no STUN server could be reached at all, the result is `ERROR`, never `PASS`.
+- **dns:** lists the configured resolvers per interface. A public resolver on a non-VPN interface while a VPN is up is a leak when a STUN request from that interface also reached the internet outside the tunnel; if it is only configured (your VPN's kill switch may block it), it is a warning. A LAN resolver is a warning. On macOS only the default resolvers count, not the "scoped" ones. With `--active-dns`, Mullvad's test shows which resolvers really answered.
 - **verify:** while a profile is engaged, the usual verify results.
 
 `--no-ipv6`, `--no-stun` and `--stun HOST:PORT` (repeatable) skip or redirect probes. Exit code 3 means at least one leak was found. The report lists every host it contacted. Details per OS: [docs/platforms.md](docs/platforms.md#leak-checks).
@@ -328,7 +335,7 @@ docs/
 ## Development
 
 ```sh
-cargo build --workspace
+cargo build --workspace      # --workspace includes the tray (Rust 1.90+)
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```

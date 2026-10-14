@@ -313,15 +313,16 @@ The socket is bound to both the local address and the interface:
 | OS | Interface binding |
 |---|---|
 | Windows | `setsockopt(IPPROTO_IP, IP_UNICAST_IF)` with the interface index in network byte order; `setsockopt(IPPROTO_IPV6, IPV6_UNICAST_IF)` in host byte order. Raw `windows-sys` call: socket2 has no Windows wrapper. |
-| Linux | `SO_BINDTOIFINDEX` (socket2 `bind_device_by_index_v4/v6`). Kernels before 5.7 may need `CAP_NET_RAW`; a refusal is reported as "blocked", not as an error. |
+| Linux | `SO_BINDTOIFINDEX` (socket2 `bind_device_by_index_v4/v6`). Before kernel 5.7 it needs root or `CAP_NET_RAW`, and it does not exist before 5.0. Such a refusal means the request was never sent: it is reported as "not tested", not as "blocked". |
 | macOS | `IP_BOUND_IF` / `IPV6_BOUND_IF` (same socket2 calls). |
 
 Verdicts:
 
 - **LEAK:** a VPN is up and a request bound to a physical interface gets an answer whose public address is not the VPN exit. Any web page can learn that address through WebRTC. The advice is to turn on the VPN's kill switch, or limit WebRTC in the browser (Firefox `media.peerconnection.ice.default_address_only`, Chromium-based browsers: WebRTC IP handling `disable_non_proxied_udp`).
 - **WARN:** the default-route answer differs from the exit (a VPN with a separate UDP exit, or a partial tunnel). Also `WARN` with no local VPN when UDP leaves with another address than HTTPS (what a proxy-style VPN would leak).
-- **PASS:** every answer shows the exit IP, or the physical-interface requests get no answer or no route while the VPN is up (a working kill switch).
-- "No route" and "blocked" answers are listed but never count as a leak.
+- **PASS:** every answer shows the exit IP, or the physical-interface requests get no answer, no route or a local firewall refusal while the VPN is up (a working kill switch).
+- **ERROR:** a VPN is up and not one request bound to a physical interface could be sent (every socket bind failed, for example on Linux before 5.7 without root), or no request could be sent at all (for example a `--stun` server that does not resolve). Exit code 1.
+- "No route", "blocked" and "not tested" answers are listed but never count as a leak.
 
 ### 4. DNS
 
@@ -331,11 +332,12 @@ Configured resolvers are listed per interface, read-only:
 |---|---|---|
 | Windows | `powershell -NoProfile -NonInteractive -Command <script>` running `Get-DnsClientServerAddress`, printed as JSON | Windows' placeholder `fec0:0:0:ffff::1..3` entries are ignored. |
 | Linux | `resolvectl status --no-pager` | Falls back to `/etc/resolv.conf` (no interface information) when `resolvectl` is missing or fails. |
-| macOS | `scutil --dns` | Both the default and the "for scoped queries" resolver lists are read. |
+| macOS | `scutil --dns` | Only the default resolver list is read. The "for scoped queries" list is skipped: macOS uses it only for lookups an app ties to one interface, and with a VPN up it always holds `en0`'s router resolver. |
 
 While a VPN is up, a resolver set on an up, non-VPN, non-loopback interface (and not also set on the VPN interface) is flagged:
 
-- **LEAK** for a public resolver (for example `8.8.8.8` on `Ethernet`).
+- **LEAK** for a public resolver (for example `8.8.8.8` on `Ethernet`) when there is evidence that queries can reach it: a STUN request bound to that same interface got an answer that is not the VPN exit.
+- **WARN** for a public resolver that is only configured: a kill switch ("block untunneled traffic") usually drops those queries, so it is a leak only if your VPN does not block them. Run with `--active-dns` to see which resolvers really answer.
 - **WARN** for a LAN resolver (for example `192.168.1.1`): your router may forward the queries to your ISP outside the tunnel, unless the router itself is behind the VPN.
 - Resolvers on down interfaces and local stubs (`127.0.0.53`) are listed but not flagged.
 
@@ -358,7 +360,7 @@ When `apply` or `run` has engaged a profile, the orchestrator's verify results a
 
 ### Proxies
 
-The IPv6 probe and the active DNS test turn off `HTTP(S)_PROXY` (`no_proxy()`). Geoveil's reqwest build has no `system-proxy` feature, so the Windows registry proxy is never used. The exit IP lookup is the shared public-IP lookup, which honours `HTTP(S)_PROXY` environment variables.
+Every `leaks` request turns off `HTTP(S)_PROXY` (`no_proxy()`): the IPv6 probe, the active DNS test and the exit IP lookup (`geo::public_ip_direct`, the same endpoints as the shared public-IP lookup). A proxy would otherwise report its own address as the exit. Geoveil's reqwest build has no `system-proxy` feature, so the Windows registry proxy is never used. (`apply` and `run` use the shared lookup, which honours `HTTP(S)_PROXY`.)
 
 ## Start at login (`geoveil autostart`)
 
@@ -366,8 +368,13 @@ Per user only; no admin rights, no system service. The entry starts `geoveil-tra
 
 | OS | `enable` | `disable` | `status` |
 |---|---|---|---|
-| Windows | `reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Geoveil /t REG_SZ /d "\"<tray>\" --autostart" /f` | `reg delete ...\Run /v Geoveil /f` (a missing value is fine) | `reg query ...\Run /v Geoveil`, then `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run /v Geoveil` (first byte `03` = turned off in Task Manager) |
+| Windows | `reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v Geoveil /t REG_SZ /d "\"<tray>\" --autostart" /f` | `reg query ...\Run /v Geoveil`; only if that exits 0, `reg delete ...\Run /v Geoveil /f` (decided by exit code, so it works in any Windows display language) | `reg query ...\Run /v Geoveil`, then `reg query HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run /v Geoveil` (first byte `03` = turned off in Task Manager) |
 | Linux | writes `$XDG_CONFIG_HOME/systemd/user/geoveil-tray.service` (`WantedBy=graphical-session.target`, `Restart=on-failure`), then `systemctl --user daemon-reload` and `systemctl --user enable geoveil-tray.service` | `systemctl --user disable geoveil-tray.service`, removes the file, `systemctl --user daemon-reload` | reads the file and `systemctl --user is-enabled geoveil-tray.service` |
 | macOS | writes `~/Library/LaunchAgents/io.geoveil.tray.plist` (`RunAtLoad`, restart only after a crash); launchd loads it at the next login | removes the file | reads the file |
 
 The tray path must be absolute and may not contain control characters or double quotes. It is quoted for the registry, escaped for systemd (`\`, `"`, `%`, `$`) and XML-escaped for the plist.
+
+Limits:
+
+- **Linux:** the unit is started by `graphical-session.target`, which only desktops with systemd session integration reach (GNOME, KDE Plasma). On XFCE, MATE, Cinnamon, i3 and other window managers the tray does not start although `status` says "enabled"; add `geoveil-tray --autostart` to the desktop's own startup programs.
+- **The daemon runs as the user.** The tray starts `geoveil run` as the logged-in user, and both IPC ends refuse a peer of another user, so the tray cannot control a `sudo geoveil run`. On macOS that daemon can only change the locale (the time zone and location need root); on Linux the time zone and locale need polkit approval, and `--location` needs root. `enable` prints this as a warning on Linux and macOS.
