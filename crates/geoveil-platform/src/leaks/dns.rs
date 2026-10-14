@@ -243,8 +243,12 @@ pub fn parse_resolv_conf(text: &str) -> Vec<DnsServer> {
     out
 }
 
-/// Parses `scutil --dns`: both the default and the "for scoped queries"
-/// sections. Resolvers without an `if_index` are reported without interface.
+/// Parses `scutil --dns`: only the default section. The "for scoped
+/// queries" section is skipped, because macOS uses those resolvers only for
+/// lookups an app explicitly ties to that interface, not for normal traffic;
+/// with a VPN up, `en0`'s router resolver always sits there and would
+/// otherwise look like a leak. Resolvers without an `if_index` are reported
+/// without interface.
 pub fn parse_scutil_dns(text: &str) -> Vec<DnsServer> {
     #[derive(Default)]
     struct Block {
@@ -261,10 +265,17 @@ pub fn parse_scutil_dns(text: &str) -> Vec<DnsServer> {
 
     let mut out = Vec::new();
     let mut block = Block::default();
+    let mut scoped = false;
     for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with("resolver #") || trimmed.starts_with("DNS configuration") {
             flush(&mut block, &mut out);
+            if trimmed.starts_with("DNS configuration") {
+                scoped = trimmed.contains("scoped");
+            }
+            continue;
+        }
+        if scoped {
             continue;
         }
         let Some((key, value)) = trimmed.split_once(" : ").or_else(|| trimmed.split_once(':')) else {
@@ -477,15 +488,26 @@ resolver #2
 ";
 
     #[test]
-    fn scutil_both_sections() {
-        assert_eq!(
-            parse_scutil_dns(SCUTIL_SAMPLE),
-            vec![
-                srv(Some("utun4"), Some(21), "10.64.0.1"),
-                srv(Some("en0"), Some(6), "192.168.1.1"),
-                srv(Some("en0"), Some(6), "fe80::1"),
-            ]
-        );
+    fn scutil_skips_scoped_section() {
+        // en0's router resolver appears only "for scoped queries" while the
+        // VPN owns the default resolver: it must not be reported.
+        assert_eq!(parse_scutil_dns(SCUTIL_SAMPLE), vec![srv(Some("utun4"), Some(21), "10.64.0.1")]);
+        // Without a VPN the default section carries en0's resolver.
+        let no_vpn = "\
+DNS configuration
+
+resolver #1
+  nameserver[0] : 192.168.1.1
+  if_index : 6 (en0)
+
+DNS configuration (for scoped queries)
+
+resolver #1
+  nameserver[0] : 192.168.1.1
+  if_index : 6 (en0)
+  flags    : Scoped, Request A records
+";
+        assert_eq!(parse_scutil_dns(no_vpn), vec![srv(Some("en0"), Some(6), "192.168.1.1")]);
     }
 
     #[test]
@@ -493,7 +515,7 @@ resolver #2
         let fake = FakeRunner::new();
         fake.push_stdout(SCUTIL_SAMPLE);
         let d = discover_macos(&fake);
-        assert_eq!(d.servers.len(), 3);
+        assert_eq!(d.servers.len(), 1);
         assert_eq!(fake.calls(), vec!["scutil --dns"]);
         let fake = FakeRunner::new();
         fake.push_err(io::ErrorKind::NotFound);

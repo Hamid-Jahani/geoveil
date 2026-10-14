@@ -38,7 +38,7 @@ type UrlFn = fn(Option<IpAddr>) -> String;
 /// The built-in providers: ipwho.is, ipapi.co, ip-api.com and ipinfo.io,
 /// sharing one HTTP client.
 pub fn default_providers() -> Vec<Box<dyn IpGeoProvider>> {
-    let client = build_client(PROVIDER_CLIENT_TIMEOUT, Family::Any);
+    let client = build_client(PROVIDER_CLIENT_TIMEOUT, Family::Any, ProxyMode::System);
     let specs: [(&'static str, UrlFn, ParseFn); 4] = [
         (IPWHOIS, ipwhois_url, parse_ipwhois),
         (IPAPI_CO, ipapi_co_url, parse_ipapi_co),
@@ -56,6 +56,16 @@ pub fn default_providers() -> Vec<Box<dyn IpGeoProvider>> {
             }) as Box<dyn IpGeoProvider>
         })
         .collect()
+}
+
+/// Whether an HTTP client honours proxy settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyMode {
+    /// `HTTP(S)_PROXY`, `ALL_PROXY` and the system proxy apply.
+    System,
+    /// Always connect directly, so the answer is the address this machine's
+    /// own traffic leaves with.
+    Direct,
 }
 
 /// Address family used for public-IP discovery.
@@ -78,7 +88,16 @@ enum Family {
 /// again without restricting the family. Within one round the first valid
 /// answer wins.
 pub async fn public_ip(timeout: Duration) -> Result<IpAddr, GeoError> {
-    public_ip_with(|family| query_public_ip(family, timeout)).await
+    public_ip_with(|family| query_public_ip(family, timeout, ProxyMode::System)).await
+}
+
+/// Like [`public_ip`], but ignores `HTTP(S)_PROXY` and the system proxy.
+///
+/// `geoveil leaks` uses this: its other probes bypass proxies too (see
+/// [`crate::leaks::net`]), and an exit IP seen through a proxy would be the
+/// proxy's address, making every STUN answer look like a mismatch.
+pub async fn public_ip_direct(timeout: Duration) -> Result<IpAddr, GeoError> {
+    public_ip_with(|family| query_public_ip(family, timeout, ProxyMode::Direct)).await
 }
 
 /// IPv4 first, then any family; `query` performs one round of lookups.
@@ -99,8 +118,8 @@ where
 }
 
 /// One round: query every endpoint concurrently over `family`.
-async fn query_public_ip(family: Family, timeout: Duration) -> Result<IpAddr, String> {
-    let client = build_client(timeout, family)?;
+async fn query_public_ip(family: Family, timeout: Duration, proxy: ProxyMode) -> Result<IpAddr, String> {
+    let client = build_client(timeout, family, proxy)?;
     let futs: Vec<BoxFuture<'_, Result<IpAddr, String>>> = PUBLIC_IP_ENDPOINTS
         .iter()
         .map(|url| Box::pin(fetch_public_ip(&client, url, timeout)) as BoxFuture<'_, _>)
@@ -133,17 +152,17 @@ fn parse_plain_ip(body: &str) -> Result<IpAddr, String> {
 
 /// HTTP client with a total request `timeout`. [`Family::V4`] binds to
 /// `0.0.0.0`, which makes the connector use IPv4 destination addresses only.
-fn build_client(timeout: Duration, family: Family) -> Result<reqwest::Client, String> {
+/// [`ProxyMode::Direct`] disables every proxy, including the environment's.
+fn build_client(timeout: Duration, family: Family, proxy: ProxyMode) -> Result<reqwest::Client, String> {
     let local = match family {
         Family::V4 => Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
         Family::Any => None,
     };
-    reqwest::Client::builder()
-        .user_agent(USER_AGENT)
-        .timeout(timeout)
-        .local_address(local)
-        .build()
-        .map_err(|e| format!("building HTTP client: {e}"))
+    let mut builder = reqwest::Client::builder().user_agent(USER_AGENT).timeout(timeout).local_address(local);
+    if proxy == ProxyMode::Direct {
+        builder = builder.no_proxy();
+    }
+    builder.build().map_err(|e| format!("building HTTP client: {e}"))
 }
 
 /// A provider defined by a URL builder and a pure JSON parser.
@@ -649,8 +668,27 @@ mod tests {
     fn provider_client_cap_allows_cli_maximum_timeout() {
         // `--provider-timeout-secs` accepts up to 120; the client must not cut it short.
         assert!(PROVIDER_CLIENT_TIMEOUT >= Duration::from_secs(120));
-        assert!(build_client(PROVIDER_CLIENT_TIMEOUT, Family::Any).is_ok());
-        assert!(build_client(Duration::from_secs(5), Family::V4).is_ok());
+        assert!(build_client(PROVIDER_CLIENT_TIMEOUT, Family::Any, ProxyMode::System).is_ok());
+        assert!(build_client(Duration::from_secs(5), Family::V4, ProxyMode::System).is_ok());
+    }
+
+    #[tokio::test]
+    async fn direct_client_fetches_plain_ip() {
+        // A one-shot HTTP server on loopback stands in for an endpoint.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/ip", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut conn, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = conn.read(&mut buf);
+            conn.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\nconnection: close\r\n\r\n203.0.113.7\n")
+                .unwrap();
+        });
+        let client = build_client(Duration::from_secs(5), Family::V4, ProxyMode::Direct).unwrap();
+        let ip = fetch_public_ip(&client, &url, Duration::from_secs(5)).await.unwrap();
+        server.join().unwrap();
+        assert_eq!(ip, "203.0.113.7".parse::<IpAddr>().unwrap());
     }
 
     #[tokio::test]

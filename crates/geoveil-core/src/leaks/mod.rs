@@ -10,8 +10,8 @@
 //! |---|---|
 //! | [`CheckId::Vpn`] | never; reports the VPN interfaces and the exit IP |
 //! | [`CheckId::Ipv6`] | a VPN is up and an IPv6-only endpoint sees one of this machine's own (non-VPN) global IPv6 addresses |
-//! | [`CheckId::Webrtc`] | a VPN is up and a STUN request bound to a physical interface gets an answer with a public address other than the VPN exit |
-//! | [`CheckId::Dns`] | a VPN is up and a public resolver is configured only on a non-VPN interface |
+//! | [`CheckId::Webrtc`] | a VPN is up and a STUN request bound to a physical interface gets an answer with a public address other than the VPN exit (`error` when no interface-bound probe could run) |
+//! | [`CheckId::Dns`] | a VPN is up, a public resolver is configured only on a non-VPN interface, and a STUN probe from that interface reached the internet outside the tunnel (`warn` when only configured) |
 //! | [`CheckId::DnsActive`] | (opt-in) a resolver seen by the unique-name test is one of this machine's own addresses |
 //! | [`CheckId::Verify`] | never; reports whether an engaged profile still matches the system |
 //!
@@ -198,8 +198,13 @@ pub enum StunOutcome {
     Timeout,
     /// The OS has no route from this interface (expected for host-only adapters).
     NoRoute { detail: String },
-    /// The OS or a firewall refused (permission denied, port unreachable).
+    /// A local firewall refused the datagram or the server's port was
+    /// unreachable. The request was sent (or the send was refused).
     Blocked { detail: String },
+    /// The probe never ran: the socket could not be created or bound to the
+    /// interface (for example `EPERM` from `SO_BINDTOIFINDEX` on Linux
+    /// before 5.7 without `CAP_NET_RAW`). Says nothing about leaks.
+    Untested { detail: String },
     /// Anything else (bad response, resolution failure, socket error).
     Failed { detail: String },
 }
@@ -338,7 +343,7 @@ pub fn evaluate(inputs: LeakInputs) -> LeakReport {
         check_vpn(&ctx, &inputs.exit),
         check_ipv6(&ctx, &inputs.exit_v6),
         check_webrtc(&ctx, inputs.stun.as_deref()),
-        check_dns(&ctx, &inputs.dns),
+        check_dns(&ctx, &inputs.dns, inputs.stun.as_deref()),
     ];
     if let Some(active) = &inputs.active_dns {
         checks.push(check_active_dns(&ctx, active));
@@ -605,7 +610,22 @@ fn check_webrtc(ctx: &Ctx<'_>, probes: Option<&[StunProbe]>) -> CheckResult {
     let mut worst = Verdict::Pass;
     let mut leaked: BTreeSet<IpAddr> = BTreeSet::new();
     let mut mapped_any = false;
+    // Whether any probe, and any interface-bound probe, actually reached the
+    // network: an answer, silence, no route or a firewall refusal. Socket
+    // setup errors and resolution failures prove nothing either way.
+    let mut ran_any = false;
+    let mut bound_any = false;
+    let mut bound_ran = false;
     for p in probes {
+        let ran = matches!(
+            p.outcome,
+            StunOutcome::Mapped { .. } | StunOutcome::Timeout | StunOutcome::NoRoute { .. } | StunOutcome::Blocked { .. }
+        );
+        ran_any |= ran;
+        if p.interface.is_some() {
+            bound_any = true;
+            bound_ran |= ran;
+        }
         let via = match (&p.interface, p.local) {
             (Some(i), Some(l)) => format!("{i} ({l})"),
             (Some(i), None) => i.clone(),
@@ -618,6 +638,7 @@ fn check_webrtc(ctx: &Ctx<'_>, probes: Option<&[StunProbe]>) -> CheckResult {
                     StunOutcome::Timeout => "no answer".to_string(),
                     StunOutcome::NoRoute { detail } => format!("no route ({detail})"),
                     StunOutcome::Blocked { detail } => format!("blocked ({detail})"),
+                    StunOutcome::Untested { detail } => format!("not tested ({detail})"),
                     StunOutcome::Failed { detail } => format!("failed ({detail})"),
                     StunOutcome::Mapped { .. } => unreachable!(),
                 };
@@ -672,6 +693,14 @@ fn check_webrtc(ctx: &Ctx<'_>, probes: Option<&[StunProbe]>) -> CheckResult {
         )
         .details(details)
         .advice(WEBRTC_ADVICE),
+        _ if !ran_any => CheckResult::new(id, Verdict::Error, "no STUN probe could run (check --stun and the network)")
+            .details(details),
+        _ if ctx.vpn_up && bound_any && !bound_ran => CheckResult::new(
+            id,
+            Verdict::Error,
+            "could not test the physical interfaces (binding to them failed); run as root/administrator",
+        )
+        .details(details),
         _ if !mapped_any && ctx.vpn_up => {
             CheckResult::new(id, Verdict::Pass, "no STUN answer outside the VPN (UDP blocked or no route)").details(details)
         }
@@ -683,8 +712,24 @@ fn check_webrtc(ctx: &Ctx<'_>, probes: Option<&[StunProbe]>) -> CheckResult {
     }
 }
 
+/// Whether a STUN probe bound to `iface` got an answer showing an address
+/// other than the VPN exit: proof that traffic from that interface reaches
+/// the internet outside the tunnel (no kill switch blocks it).
+fn path_open_outside_vpn(ctx: &Ctx<'_>, iface: &LeakInterface, probes: Option<&[StunProbe]>) -> bool {
+    probes.unwrap_or_default().iter().any(|p| {
+        p.interface.as_deref().is_some_and(|n| iface.matches_name(n))
+            && matches!(&p.outcome, StunOutcome::Mapped { addr } if !ctx.is_exit(addr.ip()))
+    })
+}
+
 /// (4) Passive DNS configuration.
-fn check_dns(ctx: &Ctx<'_>, dns: &DnsDiscovery) -> CheckResult {
+///
+/// A resolver configured only on a physical interface is a leak only when
+/// queries can reach it: a VPN kill switch ("block untunneled traffic")
+/// usually drops them. A public resolver is therefore `Leak` only when a
+/// STUN probe bound to the same interface proved the path is open, and
+/// `Warn` otherwise.
+fn check_dns(ctx: &Ctx<'_>, dns: &DnsDiscovery, stun: Option<&[StunProbe]>) -> CheckResult {
     let id = CheckId::Dns;
     if dns.servers.is_empty() {
         return match &dns.error {
@@ -703,7 +748,8 @@ fn check_dns(ctx: &Ctx<'_>, dns: &DnsDiscovery) -> CheckResult {
 
     let mut details = Vec::new();
     let mut worst = Verdict::Pass;
-    let mut flagged = Vec::new();
+    let mut flagged_leak = Vec::new();
+    let mut flagged_warn = Vec::new();
     for (server, iface) in &resolved {
         let label = match (iface, &server.interface) {
             (Some((i, _)), _) => i.display_name().to_string(),
@@ -727,14 +773,24 @@ fn check_dns(ctx: &Ctx<'_>, dns: &DnsDiscovery) -> CheckResult {
                 line.push_str(": local stub resolver");
                 Verdict::Pass
             } else if is_public(&addr) {
-                line.push_str(": public resolver outside the VPN");
-                Verdict::Leak
+                let open = matches!(iface, Some((i, _)) if path_open_outside_vpn(ctx, i, stun));
+                if open {
+                    line.push_str(": public resolver outside the VPN, and STUN shows this interface reaches the internet directly");
+                    Verdict::Leak
+                } else {
+                    line.push_str(
+                        ": public resolver outside the VPN; configured only, reachable if your VPN does not block it",
+                    );
+                    Verdict::Warn
+                }
             } else {
                 line.push_str(": LAN resolver outside the VPN (your router may forward queries to your ISP)");
                 Verdict::Warn
             };
-            if verdict != Verdict::Pass {
-                flagged.push(format!("{} on {label}", server.addr));
+            match verdict {
+                Verdict::Leak => flagged_leak.push(format!("{} on {label}", server.addr)),
+                Verdict::Warn => flagged_warn.push(format!("{} on {label}", server.addr)),
+                _ => {}
             }
             worst = worst.max(verdict);
         }
@@ -760,14 +816,17 @@ fn check_dns(ctx: &Ctx<'_>, dns: &DnsDiscovery) -> CheckResult {
         Verdict::Leak => CheckResult::new(
             id,
             Verdict::Leak,
-            format!("resolver(s) configured only outside the VPN: {}", flagged.join(", ")),
+            format!("resolver(s) outside the VPN on an interface with an open path: {}", flagged_leak.join(", ")),
         )
         .details(details)
         .advice(DNS_ADVICE),
         Verdict::Warn => CheckResult::new(
             id,
             Verdict::Warn,
-            format!("LAN resolver(s) configured outside the VPN: {}", flagged.join(", ")),
+            format!(
+                "resolver(s) configured outside the VPN: {} (a leak only if your VPN does not block them)",
+                flagged_warn.join(", ")
+            ),
         )
         .details(details)
         .advice(DNS_ADVICE),
@@ -1075,6 +1134,53 @@ mod tests {
         assert_eq!(check(&evaluate(inputs), CheckId::Webrtc).verdict, Verdict::Pass);
     }
 
+    fn outcome_probe(iface: Option<&str>, outcome: StunOutcome) -> StunProbe {
+        StunProbe { outcome, ..probe(iface, "1.1.1.1") }
+    }
+
+    #[test]
+    fn webrtc_untested_physical_interfaces_is_error_not_pass() {
+        // Linux < 5.7 without CAP_NET_RAW: every interface bind fails while
+        // the default route maps to the exit.
+        let mut inputs = base(true);
+        inputs.stun = Some(vec![
+            probe(None, "185.65.135.230"),
+            outcome_probe(Some("Ethernet"), StunOutcome::Untested { detail: "Operation not permitted".into() }),
+        ]);
+        let r = evaluate(inputs);
+        let c = check(&r, CheckId::Webrtc);
+        assert_eq!(c.verdict, Verdict::Error, "{c:?}");
+        assert!(c.details.iter().any(|d| d.contains("not tested")));
+        assert_eq!(r.outcome, LeakOutcome::Incomplete);
+
+        // One physical probe ran (timeout = blocked by a kill switch): pass.
+        let mut inputs = base(true);
+        inputs.stun = Some(vec![
+            probe(None, "185.65.135.230"),
+            outcome_probe(Some("Ethernet"), StunOutcome::Untested { detail: "v6 tentative".into() }),
+            outcome_probe(Some("Ethernet"), StunOutcome::Timeout),
+        ]);
+        assert_eq!(check(&evaluate(inputs), CheckId::Webrtc).verdict, Verdict::Pass);
+
+        // A firewall refusal on send is a real result.
+        let mut inputs = base(true);
+        inputs.stun = Some(vec![outcome_probe(Some("Ethernet"), StunOutcome::Blocked { detail: "refused".into() })]);
+        assert_eq!(check(&evaluate(inputs), CheckId::Webrtc).verdict, Verdict::Pass);
+    }
+
+    #[test]
+    fn webrtc_all_probes_failed_is_error() {
+        // A mistyped --stun server: nothing resolved, nothing was tested.
+        for vpn in [true, false] {
+            let mut inputs = base(vpn);
+            let failed = || StunOutcome::Failed { detail: "cannot resolve".into() };
+            inputs.stun = Some(vec![outcome_probe(None, failed()), outcome_probe(Some("Ethernet"), failed())]);
+            let r = evaluate(inputs);
+            assert_eq!(check(&r, CheckId::Webrtc).verdict, Verdict::Error, "vpn={vpn}");
+            assert_eq!(r.outcome, LeakOutcome::Incomplete);
+        }
+    }
+
     #[test]
     fn webrtc_default_route_mismatch_warns() {
         let mut inputs = base(true);
@@ -1122,14 +1228,45 @@ mod tests {
     }
 
     #[test]
-    fn dns_public_resolver_outside_vpn_is_leak() {
+    fn dns_public_resolver_outside_vpn_is_leak_when_path_is_open() {
         let mut inputs = base(true);
         inputs.dns = dns(&[(Some("Ethernet"), Some(4), "8.8.8.8"), (Some("wg-home"), Some(17), "10.64.0.1")]);
+        // STUN from Ethernet reached the internet outside the tunnel.
+        inputs.stun = Some(vec![probe(None, "185.65.135.230"), probe(Some("Ethernet"), "82.152.98.44")]);
         let r = evaluate(inputs);
         let c = check(&r, CheckId::Dns);
         assert_eq!(c.verdict, Verdict::Leak);
         assert!(c.summary.contains("8.8.8.8 on Ethernet"));
         assert!(c.details.iter().any(|d| d.contains("10.64.0.1 on wg-home (VPN)")));
+    }
+
+    #[test]
+    fn dns_public_resolver_only_configured_warns() {
+        // Kill switch: the Ethernet STUN probe got no answer, so the
+        // resolver is configured but probably unreachable.
+        let mut inputs = base(true);
+        inputs.dns = dns(&[(Some("Ethernet"), Some(4), "8.8.8.8"), (Some("wg-home"), Some(17), "10.64.0.1")]);
+        let mut blocked = probe(Some("Ethernet"), "1.1.1.1");
+        blocked.outcome = StunOutcome::Timeout;
+        inputs.stun = Some(vec![probe(None, "185.65.135.230"), blocked]);
+        let r = evaluate(inputs);
+        let c = check(&r, CheckId::Dns);
+        assert_eq!(c.verdict, Verdict::Warn, "{c:?}");
+        assert!(c.summary.contains("8.8.8.8 on Ethernet"));
+        assert!(c.details.iter().any(|d| d.contains("configured only")));
+        assert_eq!(r.outcome, LeakOutcome::Clean);
+
+        // STUN skipped: no evidence either way.
+        let mut inputs = base(true);
+        inputs.dns = dns(&[(Some("Ethernet"), Some(4), "8.8.8.8")]);
+        inputs.stun = None;
+        assert_eq!(check(&evaluate(inputs), CheckId::Dns).verdict, Verdict::Warn);
+
+        // A STUN answer from Ethernet that shows the exit is not evidence.
+        let mut inputs = base(true);
+        inputs.dns = dns(&[(Some("Ethernet"), Some(4), "8.8.8.8")]);
+        inputs.stun = Some(vec![probe(Some("Ethernet"), "185.65.135.230")]);
+        assert_eq!(check(&evaluate(inputs), CheckId::Dns).verdict, Verdict::Warn);
     }
 
     #[test]

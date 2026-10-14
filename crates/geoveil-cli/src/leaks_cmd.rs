@@ -19,7 +19,7 @@ use geoveil_core::VerifyReport;
 use geoveil_platform::leaks::{dns, list_leak_interfaces, select_targets, stun};
 use geoveil_platform::SystemRunner;
 
-/// Hosts contacted by `geo::public_ip` (kept in sync with its endpoint list).
+/// Hosts contacted by `geo::public_ip_direct` (kept in sync with its endpoint list).
 const PUBLIC_IP_HOSTS: [&str; 3] = ["api.ipify.org", "icanhazip.com", "ifconfig.me"];
 
 /// Arguments for `leaks`.
@@ -111,7 +111,7 @@ pub async fn leaks(ctx: &Ctx, args: &LeaksArgs) -> Result<Exit> {
         tokio::task::spawn_blocking(move || engaged_verify(&ctx))
     };
     let exit_fut = async {
-        match geo::public_ip(timeout).await {
+        match geo::public_ip_direct(timeout).await {
             Ok(ip) => ExitProbe::Found { ip },
             Err(e) => ExitProbe::Failed { error: e.to_string() },
         }

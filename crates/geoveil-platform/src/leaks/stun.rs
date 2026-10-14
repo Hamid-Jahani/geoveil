@@ -18,6 +18,13 @@
 //!
 //! Retransmission follows RFC 8489's doubling RTO, shortened for a CLI:
 //! three sends with 500, 1000 and 2000 ms waits.
+//!
+//! An error while creating or binding the socket means the probe never ran,
+//! so it is reported as [`StunOutcome::Untested`], never as `Blocked`: on
+//! Linux before 5.7 an unprivileged `SO_BINDTOIFINDEX` fails with `EPERM`
+//! (and the option does not exist before 5.0), which must not read as "a
+//! firewall dropped it". Only errors from sending or receiving map to
+//! network outcomes (see [`classify_io_error`]).
 
 use super::ProbeTarget;
 use geoveil_core::leaks::stun::{decode_binding_response, encode_binding_request, random_transaction_id, StunError};
@@ -74,13 +81,18 @@ pub fn probe_all(targets: &[ProbeTarget], servers: &[String], schedule: &[Durati
 
 /// One STUN Binding transaction from `target` to `server`.
 pub fn probe(target: &ProbeTarget, server: SocketAddr, schedule: &[Duration]) -> StunOutcome {
-    match run_probe(target, server, schedule) {
+    let socket = match open_socket(target, server) {
+        Ok(socket) => socket,
+        Err(e) => return classify_setup_error(&e, target.interface.is_some()),
+    };
+    match run_probe(&socket, server, schedule) {
         Ok(outcome) => outcome,
         Err(e) => classify_io_error(&e),
     }
 }
 
-fn run_probe(target: &ProbeTarget, server: SocketAddr, schedule: &[Duration]) -> io::Result<StunOutcome> {
+/// Creates the UDP socket and binds it to the target interface and address.
+fn open_socket(target: &ProbeTarget, server: SocketAddr) -> io::Result<std::net::UdpSocket> {
     let socket = Socket::new(Domain::for_address(server), Type::DGRAM, Some(Protocol::UDP))?;
     let local = match &target.interface {
         Some(b) => {
@@ -91,7 +103,10 @@ fn run_probe(target: &ProbeTarget, server: SocketAddr, schedule: &[Duration]) ->
         None => SocketAddr::new(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0),
     };
     socket.bind(&SockAddr::from(local))?;
-    let socket: std::net::UdpSocket = socket.into();
+    Ok(socket.into())
+}
+
+fn run_probe(socket: &std::net::UdpSocket, server: SocketAddr, schedule: &[Duration]) -> io::Result<StunOutcome> {
 
     let tid = random_transaction_id();
     let request = encode_binding_request(&tid, Some(SOFTWARE));
@@ -125,7 +140,17 @@ fn run_probe(target: &ProbeTarget, server: SocketAddr, schedule: &[Duration]) ->
     })
 }
 
-/// Maps a socket error to a probe outcome.
+/// Maps an error from creating or binding the socket: the probe never ran.
+pub fn classify_setup_error(err: &io::Error, interface_bound: bool) -> StunOutcome {
+    let hint = if interface_bound && err.kind() == io::ErrorKind::PermissionDenied {
+        " (on Linux before kernel 5.7, binding to an interface needs root or CAP_NET_RAW)"
+    } else {
+        ""
+    };
+    StunOutcome::Untested { detail: format!("cannot bind the socket: {err}{hint}") }
+}
+
+/// Maps an error from sending or receiving to a probe outcome.
 pub fn classify_io_error(err: &io::Error) -> StunOutcome {
     use io::ErrorKind as K;
     let detail = err.to_string();
@@ -133,9 +158,9 @@ pub fn classify_io_error(err: &io::Error) -> StunOutcome {
         K::NetworkUnreachable | K::HostUnreachable | K::AddrNotAvailable | K::NetworkDown => {
             StunOutcome::NoRoute { detail }
         }
-        K::PermissionDenied => StunOutcome::Blocked {
-            detail: format!("{detail} (on Linux, binding to an interface may need CAP_NET_RAW)"),
-        },
+        // A local firewall rejecting the datagram (an OUTPUT rule makes
+        // sendto fail with EPERM on Linux).
+        K::PermissionDenied => StunOutcome::Blocked { detail: format!("refused locally: {detail}") },
         K::ConnectionReset | K::ConnectionRefused => {
             StunOutcome::Blocked { detail: format!("port unreachable: {detail}") }
         }
@@ -222,6 +247,34 @@ mod tests {
         assert!(matches!(o(io::ErrorKind::ConnectionReset), StunOutcome::Blocked { .. }));
         assert_eq!(o(io::ErrorKind::TimedOut), StunOutcome::Timeout);
         assert!(matches!(o(io::ErrorKind::InvalidData), StunOutcome::Failed { .. }));
+    }
+
+    #[test]
+    fn setup_errors_are_untested_not_blocked() {
+        let denied = io::Error::from(io::ErrorKind::PermissionDenied);
+        match classify_setup_error(&denied, true) {
+            StunOutcome::Untested { detail } => assert!(detail.contains("CAP_NET_RAW"), "{detail}"),
+            other => panic!("expected untested, got {other:?}"),
+        }
+        let unsupported = io::Error::from(io::ErrorKind::Unsupported);
+        assert!(matches!(classify_setup_error(&unsupported, true), StunOutcome::Untested { .. }));
+        assert!(matches!(
+            classify_setup_error(&denied, false),
+            StunOutcome::Untested { detail } if !detail.contains("CAP_NET_RAW")
+        ));
+    }
+
+    #[test]
+    fn unbindable_local_address_is_untested() {
+        // 192.0.2.10 (TEST-NET-1) is not an address of this machine, so the
+        // bind fails before anything is sent. Index 0 skips the interface
+        // option, so only the address bind is exercised.
+        let target = ProbeTarget {
+            interface: Some(BoundInterface { name: "eth0".into(), index: 0, local: "192.0.2.10".parse().unwrap() }),
+            ipv6: false,
+        };
+        let outcome = probe(&target, "127.0.0.1:9".parse().unwrap(), &[Duration::from_millis(10)]);
+        assert!(matches!(outcome, StunOutcome::Untested { .. }), "{outcome:?}");
     }
 
     /// A tiny STUN server on loopback, so the socket path is exercised
