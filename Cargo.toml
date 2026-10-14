@@ -5,6 +5,7 @@ members = [
     "crates/geoveil-platform",
     "crates/geoveil-cli",
     "crates/geoveil-ipc",
+    "crates/geoveil-tray",
 ]
 
 [workspace.package]
