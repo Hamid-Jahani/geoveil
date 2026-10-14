@@ -7,8 +7,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
-Nothing has been released yet. The workspace version is `0.1.0`. This section
-describes phases 1, 2, 5 and 8 of [docs/design.md](docs/design.md).
+## [0.1.0] - 2026-10-14
+
+First release. Covers phases 1, 2, 5 and 8 of [docs/design.md](docs/design.md).
+Binaries are not code-signed.
 
 ### Added
 
@@ -164,4 +166,5 @@ describes phases 1, 2, 5 and 8 of [docs/design.md](docs/design.md).
 - `geoveil status` does not query a running daemon over IPC.
 - Code signing of release binaries.
 
-[Unreleased]: https://github.com/Hamid-Jahani/geoveil/commits/main
+[Unreleased]: https://github.com/Hamid-Jahani/geoveil/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/Hamid-Jahani/geoveil/releases/tag/v0.1.0

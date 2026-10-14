@@ -1,7 +1,7 @@
 # Geoveil — system-wide location consistency with your VPN
 
 Date: 2026-10-14
-Status: approved (phases 1, 2, 5 and 8 implemented, not released yet;
+Status: approved (phases 1, 2, 5 and 8 released in v0.1.0;
 phases 3, 4 and 6 are not being pursued; phase 7 stays block-only)
 
 ## Goal
