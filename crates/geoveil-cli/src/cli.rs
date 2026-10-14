@@ -52,6 +52,31 @@ pub enum Command {
     Status,
     /// Daemon: follow the VPN up / down / exit changes automatically.
     Run(RunArgs),
+    /// Start geoveil-tray at login (per user, no admin, no system service).
+    Autostart(AutostartArgs),
+}
+
+/// Arguments for `autostart`.
+#[derive(Debug, Clone, Args)]
+pub struct AutostartArgs {
+    #[command(subcommand)]
+    pub action: AutostartAction,
+}
+
+/// `autostart` actions.
+#[derive(Debug, Clone, Subcommand)]
+pub enum AutostartAction {
+    /// Start geoveil-tray at login. Also saves --locale, --location and
+    /// --state-dir as the options the tray passes to `geoveil run`.
+    Enable {
+        /// The geoveil-tray executable (default: next to geoveil).
+        #[arg(long, value_name = "PATH")]
+        tray_path: Option<PathBuf>,
+    },
+    /// Stop starting geoveil-tray at login.
+    Disable,
+    /// Show whether geoveil-tray starts at login. Changes nothing.
+    Status,
 }
 
 /// Arguments for `apply`.
@@ -259,6 +284,25 @@ mod tests {
             other => panic!("expected run, got {other:?}"),
         }
         assert!(parse(&["run", "--interval-secs", "0"]).is_err());
+    }
+
+    #[test]
+    fn autostart_actions() {
+        match parse(&["--locale", "autostart", "enable", "--tray-path", "t"]).unwrap().command {
+            Command::Autostart(AutostartArgs { action: AutostartAction::Enable { tray_path } }) => {
+                assert_eq!(tray_path, Some(PathBuf::from("t")));
+            }
+            other => panic!("expected autostart enable, got {other:?}"),
+        }
+        assert!(matches!(
+            parse(&["autostart", "disable"]).unwrap().command,
+            Command::Autostart(AutostartArgs { action: AutostartAction::Disable })
+        ));
+        assert!(matches!(
+            parse(&["autostart", "status", "--json"]).unwrap().command,
+            Command::Autostart(AutostartArgs { action: AutostartAction::Status })
+        ));
+        assert!(parse(&["autostart"]).is_err());
     }
 
     #[test]

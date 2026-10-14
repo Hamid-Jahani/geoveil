@@ -13,9 +13,16 @@
 //! The daemon holds the state-directory lock for its whole life, and stops
 //! (restoring originals unless `--sticky`) on Ctrl-C, SIGTERM/SIGHUP, or the
 //! Windows console close / logoff / shutdown events, even mid-poll.
+//!
+//! The daemon also serves local IPC ([`crate::ipc`]): it publishes its status
+//! after every poll and runs `restore_now` / `pause` / `resume` / `shutdown`
+//! between polls. While paused it keeps watching the VPN (for the status)
+//! but neither engages nor restores.
 
 use crate::cli::RunArgs;
 use crate::commands::{list_interfaces_async, Ctx, Exit};
+use crate::ipc::{self, Control, ControlRequest, StatusParts};
+use geoveil_ipc::protocol::{DaemonStatus, ErrorBody, ErrorKind};
 use anyhow::{anyhow, Context, Result};
 use geoveil_core::geo::{self, IpGeoProvider, ResolveOptions};
 use geoveil_core::orchestrator::{Orchestrator, OrchestratorError, Report};
@@ -127,9 +134,95 @@ struct Daemon {
     resolved: Option<(IpAddr, Profile)>,
     /// When to retry a failed restore, and how many attempts failed so far.
     restore_retry: Option<(Instant, u32)>,
+    /// Following the VPN is paused (IPC `pause` / `restore_now`).
+    paused: bool,
+    /// Last engage / restore error, for the IPC status.
+    last_error: Option<String>,
+    /// VPN-like interfaces seen at the last poll.
+    vpn_interfaces: Vec<String>,
+    /// State directory, for the IPC status.
+    state_dir: String,
+    /// Where the IPC server reads the status from.
+    status_tx: tokio::sync::watch::Sender<DaemonStatus>,
+}
+
+/// What the loop does after an IPC command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AfterControl {
+    /// Keep the normal poll schedule.
+    Continue,
+    /// Poll right away (after `resume`).
+    PollNow,
+    /// Stop the daemon.
+    Stop(&'static str),
 }
 
 impl Daemon {
+    /// Publishes the current status for IPC clients and returns it.
+    async fn publish(&self) -> DaemonStatus {
+        let (engaged, profile) = with_orch(&self.orch, |o| (o.is_engaged(), o.current_profile().cloned()))
+            .await
+            .unwrap_or((false, None));
+        let status = ipc::build_status(StatusParts {
+            engaged,
+            paused: self.paused,
+            sticky: self.sticky,
+            profile,
+            vpn_up: self.detector.is_up(),
+            exit_ip: if self.detector.is_up() { self.detector.exit_ip() } else { None },
+            vpn_interfaces: self.vpn_interfaces.clone(),
+            last_error: self.last_error.clone(),
+            state_dir: self.state_dir.clone(),
+        });
+        self.status_tx.send_replace(status.clone());
+        status
+    }
+
+    /// Runs one IPC command and answers it with the resulting status.
+    async fn control(&mut self, req: ControlRequest) -> AfterControl {
+        let mut after = AfterControl::Continue;
+        let result: Result<(), String> = match req.control {
+            Control::Pause => {
+                tracing::info!("IPC: pausing; the VPN is still watched but settings are left as they are");
+                self.paused = true;
+                Ok(())
+            }
+            Control::Resume => {
+                tracing::info!("IPC: resuming");
+                self.paused = false;
+                self.retry = None;
+                self.restore_retry = None;
+                after = AfterControl::PollNow;
+                Ok(())
+            }
+            Control::RestoreNow => {
+                tracing::info!("IPC: restoring original settings now and pausing");
+                self.paused = true;
+                self.applied = None;
+                self.retry = None;
+                self.restore_retry = None;
+                match self.disengage().await {
+                    RestoreStatus::Restored | RestoreStatus::NothingToRestore => {
+                        self.last_error = None;
+                        Ok(())
+                    }
+                    RestoreStatus::Partial | RestoreStatus::Error => {
+                        let msg = "some original settings were not restored; see the daemon log".to_string();
+                        self.last_error = Some(msg.clone());
+                        Err(msg)
+                    }
+                }
+            }
+            Control::Shutdown => {
+                after = AfterControl::Stop("IPC shutdown request");
+                Ok(())
+            }
+        };
+        let status = self.publish().await;
+        let _ = req.reply.send(result.map(|()| status).map_err(|m| ErrorBody::new(ErrorKind::Failed, m)));
+        after
+    }
+
     /// One poll: interfaces, optional public-IP check, detector, reconcile.
     async fn tick(&mut self) {
         let ifaces = match list_interfaces_async().await {
@@ -153,8 +246,12 @@ impl Daemon {
         if let Some(event) = self.detector.observe(&ifaces, public_ip, Instant::now()) {
             self.on_event(event);
         }
-        let vpn_present = !VpnDetector::vpn_interfaces(&ifaces).is_empty();
-        self.reconcile(vpn_present).await;
+        self.vpn_interfaces = VpnDetector::vpn_interfaces(&ifaces);
+        let vpn_present = !self.vpn_interfaces.is_empty();
+        if !self.paused {
+            self.reconcile(vpn_present).await;
+        }
+        self.publish().await;
     }
 
     fn on_event(&mut self, event: VpnEvent) {
@@ -199,11 +296,13 @@ impl Daemon {
                 self.applied = Some(ip);
                 self.retry = None;
                 self.restore_retry = None;
+                self.last_error = None;
             }
             Err(e) => {
                 let attempt = self.retry.filter(|r| r.ip == ip).map_or(1, |r| r.attempt + 1);
                 let delay = retry_delay(attempt);
                 tracing::error!("engaging for exit {ip} incomplete: {e:#}; retrying in {}s", delay.as_secs());
+                self.last_error = Some(format!("engaging for exit {ip}: {e:#}"));
                 self.retry = Some(Retry { ip, at: Instant::now() + delay, attempt });
             }
         }
@@ -223,11 +322,15 @@ impl Daemon {
             return;
         }
         match self.disengage().await {
-            RestoreStatus::Restored | RestoreStatus::NothingToRestore => self.restore_retry = None,
+            RestoreStatus::Restored | RestoreStatus::NothingToRestore => {
+                self.restore_retry = None;
+                self.last_error = None;
+            }
             RestoreStatus::Partial | RestoreStatus::Error => {
                 let attempt = self.restore_retry.map_or(1, |(_, n)| n + 1);
                 let delay = retry_delay(attempt);
                 tracing::warn!("original settings not fully restored; retrying in {}s", delay.as_secs());
+                self.last_error = Some("original settings not fully restored; retrying".to_string());
                 self.restore_retry = Some((Instant::now() + delay, attempt));
             }
         }
@@ -338,6 +441,8 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
     let lock = ctx.lock()?;
     tracing::debug!(lock = %lock.path().display(), "holding the state lock");
     let orch: SharedOrch = Arc::new(Mutex::new(ctx.orchestrator()?));
+    let (status_tx, status_rx) = tokio::sync::watch::channel(DaemonStatus::default());
+    let (control_tx, mut controls) = tokio::sync::mpsc::channel::<ControlRequest>(8);
     let mut daemon = Daemon {
         orch,
         detector: VpnDetector::new(DetectorConfig::default()),
@@ -348,7 +453,14 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
         retry: None,
         resolved: None,
         restore_retry: None,
+        paused: false,
+        last_error: None,
+        vpn_interfaces: Vec::new(),
+        state_dir: ctx.state_dir().display().to_string(),
+        status_tx,
     };
+    daemon.publish().await;
+    let ipc_server = ipc::start(ipc::DaemonHandle::new(status_rx, control_tx)).await;
 
     let mut stop_reason = None;
     tokio::select! {
@@ -370,6 +482,14 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
             tokio::select! {
                 _ = interval.tick() => {}
                 why = shutdown.recv() => break why,
+                Some(req) = controls.recv() => {
+                    match daemon.control(req).await {
+                        AfterControl::Continue => {}
+                        AfterControl::PollNow => interval.reset_immediately(),
+                        AfterControl::Stop(why) => break why,
+                    }
+                    continue;
+                }
             }
             tokio::select! {
                 _ = daemon.tick() => {}
@@ -379,6 +499,11 @@ pub async fn run(ctx: &Ctx, args: &RunArgs) -> Result<Exit> {
         stop_reason = Some(why);
     }
     let why = stop_reason.unwrap_or("stop request");
+    // Stop taking IPC commands before the final restore.
+    if let Some(server) = ipc_server {
+        server.stop().await;
+    }
+    drop(controls);
 
     if daemon.sticky {
         tracing::warn!("{why}: stopping; --sticky set, leaving spoofed settings in place (run `geoveil restore` to undo)");
