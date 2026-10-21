@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "geoveil-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "geoveil-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "reqwest",
@@ -920,7 +920,7 @@ dependencies = [
 
 [[package]]
 name = "geoveil-ipc"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "dirs",
  "interprocess",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "geoveil-platform"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "geoveil-core",
  "netdev",
@@ -950,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "geoveil-tray"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "dirs",
