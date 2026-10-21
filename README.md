@@ -4,7 +4,7 @@
 
 Geoveil makes your operating system's time zone, locale and location match your VPN exit.
 
-> Status: early (version 0.1.0). Time zone and locale work on Windows, Linux and macOS.
+> Status: early (version 0.1.1). Time zone and locale work on Windows, Linux and macOS.
 > Location works on Linux (geoclue) and is block-only on macOS. Windows location is not spoofed.
 > A tray app (`geoveil-tray`), start at login and a read-only leak check (`geoveil leaks`) are available.
 
