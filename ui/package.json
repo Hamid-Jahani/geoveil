@@ -1,0 +1,66 @@
+{
+  "name": "geoveil-desktop",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Geoveil privacy diagnostics for your VPN and system profile.",
+  "author": "Hamid Jahani",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/Hamid-Jahani/geoveil",
+  "main": "desktop.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win nsis --x64 --publish never"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "devDependencies": {
+    "electron": "45.4.1",
+    "electron-builder": "26.18.0"
+  },
+  "build": {
+    "appId": "io.geoveil.desktop",
+    "productName": "Geoveil",
+    "directories": {
+      "output": "../target/desktop"
+    },
+    "files": [
+      "desktop.cjs",
+      "server.mjs",
+      "index.html",
+      "app.js",
+      "styles.css",
+      "map-data.js",
+      "geoveil.ico"
+    ],
+    "extraResources": [
+      {
+        "from": "bin",
+        "to": "bin",
+        "filter": ["geoveil.exe"]
+      },
+      {
+        "from": "../LICENSE",
+        "to": "LICENSE"
+      },
+      {
+        "from": "../NOTICE",
+        "to": "NOTICE"
+      }
+    ],
+    "win": {
+      "icon": "geoveil.ico",
+      "publish": null
+    },
+    "nsis": {
+      "artifactName": "Geoveil-Setup-${version}-x64.exe",
+      "oneClick": true,
+      "perMachine": false,
+      "createDesktopShortcut": false,
+      "createStartMenuShortcut": true,
+      "differentialPackage": false,
+      "packElevateHelper": false,
+      "runAfterFinish": false
+    }
+  }
+}

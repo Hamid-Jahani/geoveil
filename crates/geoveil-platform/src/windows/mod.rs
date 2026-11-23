@@ -7,6 +7,8 @@
 //!
 //! Location spoofing on Windows (virtual NMEA port / GNSS driver) is a later phase.
 
+#[cfg(windows)]
+pub mod kill_switch;
 mod locale;
 mod timezone;
 

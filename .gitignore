@@ -1,2 +1,4 @@
 /target
 **/*.rs.bk
+/ui/bin/
+/ui/node_modules/

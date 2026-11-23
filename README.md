@@ -137,6 +137,55 @@ If an apply or restore fails, the daemon retries after 30 seconds, then doubles 
 
 `--sticky` keeps the spoofed settings when the VPN goes down or the daemon stops. It only warns. Your real location can then leak while the VPN is off. Run `geoveil restore` to undo.
 
+### Windows desktop installer
+
+Run `Geoveil-Setup-<version>-x64.exe` and open **Geoveil** from the Start menu.
+The installer is per user and includes the Geoveil CLI and the desktop runtime.
+The app reads local status on launch. It contacts diagnostic providers when you
+run a check, and applies or restores settings only when you confirm the action.
+
+To build the unsigned installer, install Node.js 22.12 or newer and the Windows
+[Rust build requirements](#requirements). Run this from the repository root in
+PowerShell:
+
+```powershell
+.\ui\build-windows.ps1
+```
+
+The build compiles the CLI from the checked-out source and writes the installer
+to `target/desktop/`. To reuse an existing x64 CLI binary, pass its path with
+`-GeoveilBinary .\target\release\geoveil.exe`.
+
+
+### Local dashboard
+
+The browser dashboard shows the detected VPN exit on a map, previews the
+system profile, and displays individual leak results and their details. It can
+also apply the current VPN exit profile once and restore the saved settings.
+
+From the repository root with Node.js 22 or newer:
+
+```sh
+node ui/server.mjs --demo    # sample data, no probes or OS changes
+node ui/server.mjs           # use your local geoveil binary
+```
+
+Open [http://127.0.0.1:4173](http://127.0.0.1:4173). The server listens only on
+loopback. Set `GEOVEIL_UI_PORT` if the default port is in use. Live mode looks
+for the CLI in `target/release`, `target/debug`, and on `PATH`. To use a
+downloaded binary from another location, set `GEOVEIL_BIN` to its path before
+starting the dashboard. Use the same user and permissions you use to run the CLI.
+
+Live mode only reads system status when it opens. **Detect exit** and **Run leak
+checks** contact the providers listed in [Privacy](#privacy). Applying a profile
+requires a detected VPN adapter and changes the system time zone, plus any
+supported optional settings you select. Use the [tray app](#tray-app) to follow
+your VPN automatically or start at login.
+
+The map uses public-domain [Natural Earth](https://www.naturalearthdata.com/about/terms-of-use/)
+land boundaries. It loads locally and the exit marker is an estimate.
+
+
 ### Tray app
 
 `geoveil-tray` puts an icon in the system tray (menu bar on macOS). Its menu shows:
@@ -195,6 +244,37 @@ geoveil --json leaks          # machine-readable report
 - **verify:** while a profile is engaged, the usual verify results.
 
 `--no-ipv6`, `--no-stun` and `--stun HOST:PORT` (repeatable) skip or redirect probes. Exit code 3 means at least one leak was found. The report lists every host it contacted. Details per OS: [docs/platforms.md](docs/platforms.md#leak-checks).
+
+### Windows VPN protection (experimental)
+
+The Windows CLI can preview a session-scoped kill switch for one active VPN
+adapter. This is separate from applying an exit profile. Start with a preview in
+a normal terminal. Supply the VPN worker’s executable and the **transport server**
+IP, port, and protocol from the VPN client, rather than the public exit address
+shown by Geoveil. The command requires a numeric IPv4 transport endpoint.
+
+```powershell
+geoveil kill-switch --client 'C:\path\to\vpn-worker.exe' --server 203.0.113.10:1194 --transport udp
+```
+
+Use `--interface` when more than one VPN adapter is active. The preview reads the
+adapter and validates the input. It does not change firewall policy or contact
+the server.
+
+Test `--enable` from an Administrator terminal in a Windows VM before using it on
+your normal connection. It installs temporary Windows Filtering Platform rules
+that allow the selected adapter, the exact VPN transport, loopback, and Windows
+DHCPv4. The rules are designed to block other host IPv4 and IPv6 connections,
+including when the VPN drops. Hostname lookup outside the tunnel and reconnecting
+to a different server are blocked. If reconnecting creates a new adapter, restart
+the guard with that adapter. Local network services can stop working.
+
+Press **Ctrl+C** or close the guard process to remove its rules. Because the
+rules are tied to the firewall session, protection ends if that session or
+process exits. This mode does not protect across reboot. Keep the terminal open
+while testing, and use a second terminal to check normal VPN connectivity,
+Geoveil's Ethernet-bound STUN results, and reconnect behavior.
+
 
 ### Choose the location yourself
 
@@ -320,7 +400,7 @@ All team members use multi-factor authentication for GitHub and the signing serv
 - `geoveil leaks` detects DNS, IPv6 and WebRTC leaks but does not fix them. With a VPN on your router or a proxy, this machine cannot see your real IP, so it cannot prove there is no leak. See [docs/platforms.md](docs/platforms.md#leak-checks).
 - Geoveil does not change what your browser reports through its own APIs (for example the browser geolocation API or WebRTC). No browser extension bridge is planned. `geoveil leaks` shows what WebRTC would expose.
 - `geoveil status` reads the state file; it does not ask a running daemon over IPC yet (the tray does).
-- VPN detection uses adapter names. An unusual VPN adapter name may not be recognized. Run `geoveil detect` to check.
+- VPN detection uses active tunnel adapters. v2rayN is detected when TUN mode creates a sing-box adapter. System proxy mode alone does not create an adapter. Run `geoveil detect` to see what was recognized.
 
 ## Roadmap
 

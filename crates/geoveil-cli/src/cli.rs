@@ -56,6 +56,9 @@ pub enum Command {
     Leaks(crate::leaks_cmd::LeaksArgs),
     /// Start geoveil-tray at login (per user, no admin, no system service).
     Autostart(AutostartArgs),
+    /// Preview or start an experimental Windows VPN kill switch.
+    #[cfg(windows)]
+    KillSwitch(crate::kill_switch::Options),
 }
 
 /// Arguments for `autostart`.

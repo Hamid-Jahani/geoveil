@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10161f">
+  <title>Geoveil · Privacy dashboard</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%2318362f'/%3E%3Cpath d='m12 3 7.5 4.2v7L12 21l-7.5-6.8v-7L12 3Z M8 10h8m-7 3h6' fill='none' stroke='%2365e9c0' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/styles.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <svg xmlns="http://www.w3.org/2000/svg" width="0" height="0" class="symbols" aria-hidden="true">
+    <symbol id="i-brand" viewBox="0 0 24 24"><path d="m12 2 8.5 4.8v7.8L12 22l-8.5-7.4V6.8L12 2Z"/><path d="M7 10.9h10m-9.2 3h8.4M12 7.7c-1.3 1.4-2 3-2 4.6 0 1.6.7 3.1 2 4.4 1.3-1.3 2-2.8 2-4.4 0-1.6-.7-3.2-2-4.6Z"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
+    <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 22s7-3.4 7-9V5l-7-3-7 3v8c0 5.6 7 9 7 9Z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-sliders" viewBox="0 0 24 24"><path d="M4 6h7m4 0h5M4 12h3m4 0h9M4 18h11m4 0h1"/><circle cx="13" cy="6" r="2"/><circle cx="9" cy="12" r="2"/><circle cx="17" cy="18" r="2"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a16 16 0 0 1 0 18 16 16 0 0 1 0-18Z"/></symbol>
+    <symbol id="i-target" viewBox="0 0 24 24"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3m0 14v3M2 12h3m14 0h3"/></symbol>
+    <symbol id="i-pulse" viewBox="0 0 24 24"><path d="M2 12h5l3-7 4 14 3-7h5"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+    <symbol id="i-language" viewBox="0 0 24 24"><path d="M3 5h12m-6-2v2m4 0c0 5-4 9-9 11m2-8c1 3 3 5 6 7m1 5 4-10 4 10m-7-3h6"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M19 10c0 5-7 11-7 11S5 15 5 10a7 7 0 1 1 14 0Z"/><circle cx="12" cy="10" r="2"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 8a8.5 8.5 0 0 0-14-2L3 9m0-5v5h5m-4 7a8.5 8.5 0 0 0 14 2l3-3m0 5v-5h-5"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6m0-6-9 9m8 0v6H5V5h6"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect x="5" y="10" width="14" height="11" rx="2"/><path d="M8 10V7a4 4 0 1 1 8 0v3m-4 4v3"/></symbol>
+    <symbol id="i-interface" viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="13" rx="2"/><path d="M9 21h6m-3-4v4m-4-9h8m-6-4h4"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 8v5m0 3v.1M10.3 4.7l-8 14A1.5 1.5 0 0 0 3.6 21h16.8a1.5 1.5 0 0 0 1.3-2.3l-8-14a2 2 0 0 0-3.4 0Z"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6m0-10v.1"/></symbol>
+  </svg>
+
+  <aside class="sidebar" aria-label="Workspace">
+    <a class="brand" href="#overview" aria-label="Geoveil overview">
+      <span class="brand-mark"><svg><use href="#i-brand"/></svg></span>
+      <span><strong>geoveil<span class="brand-period">.</span></strong><small>PRIVACY WORKSPACE</small></span>
+    </a>
+    <nav class="nav" aria-label="Dashboard">
+      <span class="nav-label">WORKSPACE</span>
+      <a href="#overview" data-view="overview" aria-current="page"><svg><use href="#i-grid"/></svg><span>Overview</span></a>
+      <a href="#leaks" data-view="leaks"><svg><use href="#i-shield"/></svg><span>Leak checks</span></a>
+      <a href="#profile" data-view="profile"><svg><use href="#i-sliders"/></svg><span>System profile</span></a>
+    </nav>
+    <div class="sidebar-bottom">
+      <a class="docs-link" href="https://github.com/Hamid-Jahani/geoveil#readme" target="_blank" rel="noreferrer"><svg><use href="#i-external"/></svg> Documentation</a>
+      <div class="local-session"><svg><use href="#i-lock"/></svg><div><strong>Local workspace</strong><small>Runs on this device</small></div></div>
+    </div>
+  </aside>
+
+  <div class="workspace">
+    <header class="topbar">
+      <div class="breadcrumb">Workspace <svg><use href="#i-chevron"/></svg> <span id="breadcrumb">Overview</span></div>
+      <div class="top-right"><span id="mode" class="pill" hidden></span><span id="connection" class="pill quiet"><span class="indicator"></span>Connecting</span><button id="refresh" class="icon-button" type="button" aria-label="Refresh status" title="Refresh status"><svg><use href="#i-refresh"/></svg></button></div>
+    </header>
+
+    <main>
+      <div class="page-heading">
+        <div><h1 id="page-title" tabindex="-1">Network overview</h1><p id="page-description">Inspect your VPN exit, system profile, and network leaks.</p></div>
+        <div class="page-actions">
+          <button id="detect" class="button secondary" type="button" aria-describedby="detect-privacy"><svg><use href="#i-target"/></svg><span>Detect exit</span></button>
+          <button id="scan" class="button primary" type="button" aria-describedby="scan-privacy"><svg><use href="#i-pulse"/></svg><span>Run leak checks</span></button>
+        </div>
+      </div>
+      <span id="detect-privacy" class="sr-only">Contacts public IP and geolocation providers.</span>
+      <span id="scan-privacy" class="sr-only">Contacts external diagnostic services.</span>
+
+      <div id="operation-status" class="sr-only" role="status" aria-atomic="true"></div>
+      <div id="notice" class="notice" role="status" hidden><svg><use href="#i-info"/></svg><span id="notice-copy"></span></div>
+      <div class="dashboard" id="dashboard" data-view="overview">
+        <section id="map-panel" class="panel map-panel" aria-labelledby="map-heading">
+          <header class="panel-heading">
+            <div class="panel-title"><span class="tile green"><svg><use href="#i-globe"/></svg></span><div><h2 id="map-heading">VPN exit map</h2><p>Approximate location from IP geolocation</p></div></div>
+            <span id="vpn-badge" class="pill quiet"><span class="indicator"></span>Unknown</span>
+          </header>
+          <div class="map">
+            <canvas id="world" aria-hidden="true"></canvas>
+            <div class="map-caption"><span class="indicator"></span><span id="map-caption">AWAITING EXIT LOOKUP</span></div>
+            <div id="map-key" class="map-key" hidden><span class="indicator"></span>Resolved location</div>
+          </div>
+          <dl class="map-metrics">
+            <div><dt>Public IP</dt><dd id="ip">—</dd></div>
+            <div><dt>Exit region</dt><dd id="region">—</dd></div>
+            <div><dt>VPN interface</dt><dd id="adapter">—</dd></div>
+          </dl>
+          <details id="interfaces" class="subdetails" hidden><summary>Detected network interfaces <span id="interface-count"></span></summary><ul id="interface-list"></ul></details>
+        </section>
+
+        <section id="profile-panel" class="panel profile-panel" aria-labelledby="profile-heading">
+          <header class="panel-heading">
+            <div class="panel-title"><span class="tile blue"><svg><use href="#i-sliders"/></svg></span><div><h2 id="profile-heading">System profile</h2><p id="profile-subtitle">Settings for your VPN exit</p></div></div>
+            <span id="profile-badge" class="pill quiet">Unknown</span>
+          </header>
+          <dl class="profile-fields">
+            <div><dt><svg><use href="#i-clock"/></svg> Time zone</dt><dd id="zone">—</dd></div>
+            <div><dt><svg><use href="#i-language"/></svg> Locale</dt><dd id="locale">—</dd></div>
+            <div><dt><svg><use href="#i-pin"/></svg> Exit coordinates</dt><dd id="location">—</dd></div>
+          </dl>
+          <div class="profile-controls">
+            <button id="apply" class="button secondary profile-button" type="button">Apply exit profile <svg><use href="#i-chevron"/></svg></button>
+            <button id="restore" class="button text-button" type="button">Restore original settings</button>
+            <p id="profile-help">Detect a VPN exit to preview a profile.</p>
+          </div>
+          <details id="apply-options" class="subdetails" hidden>
+            <summary>Profile options</summary>
+            <div class="options">
+              <label><input id="use-locale" type="checkbox"> Also change regional formats</label>
+              <label id="location-option"><input id="use-location" type="checkbox"> <span id="location-option-label">Also change system location</span></label>
+              <p id="platform-note"></p>
+            </div>
+          </details>
+          <details id="verification" class="subdetails" hidden><summary>System verification</summary><ul id="verification-list"></ul></details>
+        </section>
+
+        <section id="leaks-panel" class="panel leaks-panel" aria-labelledby="leaks-heading">
+          <header class="panel-heading">
+            <div class="panel-title"><span class="tile green"><svg><use href="#i-shield"/></svg></span><div><h2 id="leaks-heading">Leak checks</h2><p id="report-caption">Check for traffic that could escape your VPN tunnel.</p></div></div>
+            <span id="leak-badge" class="pill quiet"><span class="indicator"></span>Not run</span>
+          </header>
+          <div id="leak-guidance" class="leak-guidance" hidden>
+            <svg aria-hidden="true"><use href="#i-info"/></svg>
+            <div><strong id="leak-guidance-title"></strong><p id="leak-guidance-body"></p></div>
+          </div>
+          <div id="checks" class="checks"></div>
+          <div class="report-controls">
+            <label><input id="active-dns" type="checkbox"> Include active DNS test</label>
+            <p>Active DNS sends a test query through Mullvad.</p>
+          </div>
+          <details id="hosts" class="subdetails" hidden><summary>Services contacted</summary><ul id="host-list"></ul></details>
+        </section>
+      </div>
+      <footer class="page-footer"><span><span class="indicator"></span> Geoveil</span><span id="status-time">Local diagnostics</span></footer>
+    </main>
+  </div>
+
+  <dialog id="confirm" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <span class="tile green"><svg><use href="#i-sliders"/></svg></span>
+      <h2 id="confirm-title"></h2><p id="confirm-copy"></p>
+      <div class="dialog-actions"><button class="button secondary" value="cancel" autofocus>Cancel</button><button id="confirm-action" class="button primary" value="confirm"></button></div>
+    </form>
+  </dialog>
+</body>
+</html>

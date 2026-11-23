@@ -15,7 +15,8 @@
 //!   `cisco anyconnect`, `fortinet`, `fortissl`, `globalprotect`, `pangp`,
 //!   `cloudflarewarp` / `cloudflare warp` (Cloudflare WARP / 1.1.1.1),
 //!   `windscribe`, `private internet access`, `cyberghost`, `hotspot shield`,
-//!   `vyprvpn`, `ivpn`, `softether`;
+//!   `vyprvpn`, `ivpn`, `softether`, `singbox_tun` / `sing-tun tunnel`
+//!   (sing-box and clients such as v2rayN when TUN mode is enabled);
 //! - word tokens of the form `wg<digits>`, `tun<digits>`, `tap<digits>`,
 //!   `utun<digits>`, `ppp<digits>`, `proton<digits>` (ProtonVPN's WireGuard
 //!   interface on Linux), or starting with `ipsec`.
@@ -61,6 +62,8 @@ const VPN_SUBSTRINGS: &[&str] = &[
     "vyprvpn",
     "ivpn",
     "softether",
+    "singbox_tun",
+    "sing-tun tunnel",
 ];
 
 /// Token prefixes that must be followed by one or more digits only.
@@ -348,6 +351,7 @@ mod tests {
             "Windscribe Windtun420",
             "Private Internet Access Network Adapter",
             "SoftEther VPN Client Adapter - VPN",
+            "sing-tun Tunnel",
         ] {
             assert!(is_vpn_interface(&win(d)), "expected VPN: {d}");
         }
@@ -380,6 +384,7 @@ mod tests {
             "Microsoft ISATAP Adapter",
             "Tailscale Tunnel",
             "ZeroTier Virtual Port",
+            "sing-box HTTP Proxy",
             "VirtualBox Host-Only Ethernet Adapter",
             "Bluetooth Device (Personal Area Network)",
         ] {
@@ -389,7 +394,7 @@ mod tests {
 
     #[test]
     fn unix_names() {
-        for n in ["wg0", "tun0", "ppp0", "tap1", "ipsec0", "proton0"] {
+        for n in ["wg0", "tun0", "ppp0", "tap1", "ipsec0", "proton0", "singbox_tun"] {
             assert!(is_vpn_interface(&iface(n, "", true, &["10.0.0.2"])), "{n}");
         }
         for n in ["lo", "docker0", "tailscale0", "eth0", "wlan0", "tunnel", "wg", "proton"] {

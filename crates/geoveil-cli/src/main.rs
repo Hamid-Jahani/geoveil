@@ -7,6 +7,8 @@ mod daemon;
 mod leaks_cmd;
 mod ipc;
 mod lock;
+#[cfg(windows)]
+mod kill_switch;
 mod output;
 mod paths;
 // Only the Windows sign-out watcher sends stop requests outside tests.
@@ -50,6 +52,8 @@ async fn dispatch(cli: Cli) -> anyhow::Result<commands::Exit> {
         Command::Run(args) => daemon::run(&ctx, args).await,
         Command::Leaks(args) => leaks_cmd::leaks(&ctx, args).await,
         Command::Autostart(args) => autostart::run(&cli, args).await,
+        #[cfg(windows)]
+        Command::KillSwitch(args) => kill_switch::run(args, cli.json).await,
     }
 }
 
