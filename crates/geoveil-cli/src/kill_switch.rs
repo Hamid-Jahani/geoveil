@@ -49,6 +49,10 @@ pub struct Options {
     /// Install temporary firewall rules until Ctrl+C. Omit to preview the plan.
     #[arg(long)]
     enable: bool,
+
+    /// Automatically remove the rules after this many seconds for a bounded test.
+    #[arg(long, requires = "enable", value_parser = clap::value_parser!(u64).range(5..=120))]
+    duration_secs: Option<u64>,
 }
 
 pub async fn run(options: &Options, json: bool) -> Result<crate::commands::Exit> {
@@ -66,6 +70,7 @@ pub async fn run(options: &Options, json: bool) -> Result<crate::commands::Exit>
         "server": endpoint.to_string(),
         "transport": transport,
         "session_scoped": true,
+        "duration_secs": options.duration_secs,
         "experimental": true,
     });
 
@@ -88,11 +93,22 @@ pub async fn run(options: &Options, json: bool) -> Result<crate::commands::Exit>
     let mut stop = tokio::signal::windows::ctrl_c().context("register Ctrl+C")?;
     let guard = kill_switch::start(luid, &client, endpoint, options.transport.protocol())
         .context("could not start experimental VPN protection")?;
-    crate::output::emit(json, &plan, || format!(
-        "Experimental VPN protection active on {}. Keep this window open.\nPress Ctrl+C to stop protection.\n",
-        tunnel.display_name(),
-    ));
-    stop.recv().await;
+    crate::output::emit(json, &plan, || {
+        let stop_message = match options.duration_secs {
+            Some(seconds) => format!("Protection ends after {seconds} seconds or when you press Ctrl+C."),
+            None => "Keep this terminal open. Press Ctrl+C to stop protection.".to_string(),
+        };
+        format!("Experimental VPN protection active on {}.\n{stop_message}\n", tunnel.display_name())
+    });
+    std::io::Write::flush(&mut std::io::stdout()).context("publish protection status")?;
+    match options.duration_secs {
+        Some(seconds) => {
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(seconds), stop.recv()).await;
+        }
+        None => {
+            stop.recv().await;
+        }
+    }
     drop(guard);
     eprintln!("Geoveil VPN protection stopped.");
     Ok(crate::commands::Exit::Ok)

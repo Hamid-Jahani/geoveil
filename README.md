@@ -269,6 +269,7 @@ including when the VPN drops. Hostname lookup outside the tunnel and reconnectin
 to a different server are blocked. If reconnecting creates a new adapter, restart
 the guard with that adapter. Local network services can stop working.
 
+For a bounded test, add `--duration-secs 30` to `--enable`.
 Press **Ctrl+C** or close the guard process to remove its rules. Because the
 rules are tied to the firewall session, protection ends if that session or
 process exits. This mode does not protect across reboot. Keep the terminal open
