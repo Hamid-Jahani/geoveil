@@ -8,7 +8,7 @@ use geoveil_core::geo::{self, GeoError, IpGeoProvider, ResolveOptions};
 use geoveil_core::orchestrator::{Orchestrator, OrchestratorError, Report};
 use geoveil_core::snapshot::SnapshotStore;
 use geoveil_core::vpn::{is_vpn_interface, VpnDetector};
-use geoveil_core::{NetInterface, Profile};
+use geoveil_core::{NetInterface, Profile, ProfileSource};
 use geoveil_platform::{default_backends, interfaces, BackendOptions, SystemRunner};
 use serde_json::json;
 use std::future::Future;
@@ -118,13 +118,20 @@ pub async fn build_profile(
         ProfileRequest::Ip(ip) => geo::resolve(providers, Some(*ip), opts)
             .await
             .with_context(|| format!("resolving location of {ip}")),
-        ProfileRequest::PublicIp => profile_for_public_ip(
-            geo::public_ip(opts.timeout),
-            |ip| geo::resolve(providers, ip, opts),
-        )
-        .await
-        .context("resolving location of the public (VPN exit) IP"),
+        ProfileRequest::PublicIp => resolve_current_profile(providers, opts).await.1,
     }
+}
+
+async fn resolve_current_profile(
+    providers: &[Box<dyn IpGeoProvider>],
+    opts: &ResolveOptions,
+) -> (Option<IpAddr>, Result<Profile>) {
+    let (public_ip, profile) = profile_for_public_ip(
+        geo::public_ip(opts.timeout),
+        |ip| geo::resolve(providers, ip, opts),
+    )
+    .await;
+    (public_ip, profile.context("resolving location of the public (VPN exit) IP"))
 }
 
 /// Resolve the public IP's location: find the IP first (IPv4 preferred,
@@ -138,16 +145,21 @@ pub async fn build_profile(
 pub(crate) async fn profile_for_public_ip<R, Fut>(
     public_ip: impl Future<Output = Result<IpAddr, GeoError>>,
     resolve: R,
-) -> Result<Profile, GeoError>
+) -> (Option<IpAddr>, Result<Profile, GeoError>)
 where
     R: Fn(Option<IpAddr>) -> Fut,
     Fut: Future<Output = Result<Profile, GeoError>>,
 {
     match public_ip.await {
-        Ok(ip) => resolve(Some(ip)).await,
+        Ok(ip) => (Some(ip), resolve(Some(ip)).await),
         Err(e) => {
             tracing::warn!("could not determine the public IP ({e}); asking providers directly");
-            resolve(None).await
+            let profile = resolve(None).await;
+            let public_ip = profile.as_ref().ok().and_then(|p| match p.source {
+                ProfileSource::VpnExit { ip } => Some(ip),
+                ProfileSource::Manual => None,
+            });
+            (public_ip, profile)
         }
     }
 }
@@ -179,7 +191,7 @@ pub async fn detect(ctx: &Ctx) -> Result<Exit> {
     }
     let classified = classify(ifaces);
     let providers = geo::default_providers();
-    let resolved = build_profile(&ProfileRequest::PublicIp, &providers, &ctx.resolve_opts).await;
+    let (public_ip, resolved) = resolve_current_profile(&providers, &ctx.resolve_opts).await;
 
     let (profile, error) = match &resolved {
         Ok(p) => (Some(p), None),
@@ -192,6 +204,7 @@ pub async fn detect(ctx: &Ctx) -> Result<Exit> {
     let value = json!({
         "interfaces": interfaces_json,
         "vpn_interfaces": vpn_names,
+        "public_ip": public_ip,
         "profile": profile,
         "error": error,
     });
@@ -200,6 +213,9 @@ pub async fn detect(ctx: &Ctx) -> Result<Exit> {
         s.push_str(&format!("VPN interfaces: {}\n", output::format_names(&vpn_names)));
         if vpn_names.is_empty() {
             s.push_str("warning: no VPN interface detected\n");
+        }
+        if let Some(ip) = public_ip {
+            s.push_str(&format!("observed public IP: {ip}\n"));
         }
         if let Some(p) = profile {
             s.push_str("profile:\n");
@@ -294,7 +310,6 @@ mod tests {
     use super::*;
     use clap::Parser;
     use geoveil_core::orchestrator::BackendOutcome;
-    use geoveil_core::ProfileSource;
 
     #[test]
     fn exit_from_report() {
@@ -335,13 +350,13 @@ mod tests {
     async fn public_ip_profile_resolves_that_exact_ip() {
         let seen = std::sync::Mutex::new(Vec::new());
         let ip: IpAddr = "185.65.135.230".parse().unwrap();
-        let p = profile_for_public_ip(async move { Ok(ip) }, |asked| {
+        let (public_ip, profile) = profile_for_public_ip(async move { Ok(ip) }, |asked| {
             seen.lock().unwrap().push(asked);
             async { Ok(manual()) }
         })
-        .await
-        .unwrap();
-        assert_eq!(p, manual());
+        .await;
+        assert_eq!(public_ip, Some(ip));
+        assert_eq!(profile.unwrap(), manual());
         assert_eq!(*seen.lock().unwrap(), vec![Some(ip)]);
     }
 
@@ -349,13 +364,24 @@ mod tests {
     async fn public_ip_failure_falls_back_to_provider_lookup() {
         let seen = std::sync::Mutex::new(Vec::new());
         let failed = async { Err(GeoError::Http { provider: "public-ip".into(), detail: "offline".into() }) };
-        profile_for_public_ip(failed, |asked| {
+        let ip = "203.0.113.10".parse().unwrap();
+        let (observed, profile) = profile_for_public_ip(failed, |asked| {
             seen.lock().unwrap().push(asked);
-            async { Ok(manual()) }
+            async { Ok(Profile { source: ProfileSource::VpnExit { ip }, ..manual() }) }
         })
-        .await
-        .unwrap();
+        .await;
+        assert_eq!(observed, Some(ip));
+        assert!(profile.is_ok());
         assert_eq!(*seen.lock().unwrap(), vec![None]);
+    }
+
+    #[tokio::test]
+    async fn failed_location_keeps_the_observed_public_ip() {
+        let ip = "203.0.113.10".parse().unwrap();
+        let (observed, profile) =
+            profile_for_public_ip(async { Ok(ip) }, |_| async { Err(GeoError::NoAnswers) }).await;
+        assert_eq!(observed, Some(ip));
+        assert!(matches!(profile, Err(GeoError::NoAnswers)));
     }
 
     #[test]

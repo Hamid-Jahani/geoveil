@@ -80,10 +80,18 @@ function formatCoordinate(value, positive, negative) {
   return Math.abs(value).toFixed(2) + "° " + (value < 0 ? negative : positive);
 }
 
+function detectionIp(detection) {
+  return detection?.public_ip ?? detection?.profile?.source?.ip ?? null;
+}
+
+function sameAdapters(previous, current) {
+  return previous?.length === current.length && current.every((name) => previous.includes(name));
+}
+
 function renderLocation() {
   const detected = state.detection?.profile;
   const connectedAdapters = state.vpnInterfaces || [];
-  const resolvedIp = state.leaks?.exit_ip || detected?.source?.ip;
+  const resolvedIp = detectionIp(state.detection) || state.leaks?.exit_ip;
   let mapStatus = "AWAITING EXIT LOOKUP";
   if (state.busy === "detect") mapStatus = "RESOLVING PUBLIC IP";
   else if (detected) mapStatus = state.detection.vpn_interfaces.length ? "VPN EXIT ESTIMATE" : "PUBLIC IP ESTIMATE";
@@ -143,7 +151,7 @@ function renderProfile() {
     : preview && !canApply
       ? "An active VPN adapter is required to apply this profile."
       : canApply ? "Time zone is included. Other settings are optional."
-        : "Detect a VPN exit to preview a profile.");
+        : "Run Detect exit to find a location for the profile.");
   show("apply-options", canApply);
   show("location-option", platform === "linux" || platform === "darwin");
   setText("location-option-label", platform === "darwin" ? "Turn off Location Services" : "Also change system location");
@@ -284,7 +292,7 @@ async function request(command, options = {}) {
 async function refreshStatus() {
   try {
     const { data } = await request("status");
-    if (state.vpnInterfaces?.length && !data.vpn_interfaces.length) {
+    if (!sameAdapters(state.vpnInterfaces, data.vpn_interfaces)) {
       state.detection = null;
       state.leaks = null;
     }
@@ -312,20 +320,30 @@ async function perform(command, options) {
     }
     const { data, exitCode } = await request(command, options);
     if (command === "detect") {
+      if (state.leaks && (!sameAdapters(state.vpnInterfaces, data.vpn_interfaces)
+        || state.leaks.exit_ip !== detectionIp(data))) state.leaks = null;
       state.detection = data;
       state.vpnInterfaces = data.vpn_interfaces;
-      if (state.leaks?.exit_ip && data.profile?.source?.ip !== state.leaks.exit_ip) state.leaks = null;
-      if (data.error) notice(data.error, true);
-      else if (!data.vpn_interfaces.length) notice("No VPN adapter detected. The estimate may reflect your direct internet connection.");
-      else setText("operation-status", "Exit location updated.");
+      if (data.error) {
+        const source = data.vpn_interfaces.length ? "VPN adapter detected." : "No VPN adapter detected.";
+        const lookup = detectionIp(data) ? "Public IP found. Location lookup failed." : "The public IP and location could not be resolved.";
+        notice(source + " " + lookup + " Try Detect exit again.", true);
+        setText("operation-status", "");
+      } else if (!data.vpn_interfaces.length) {
+        notice("No VPN adapter detected. The estimate may reflect your direct internet connection.");
+      } else {
+        setText("operation-status", "Exit location updated.");
+      }
     } else if (command === "leaks") {
       state.leaks = data;
       state.scanAt = new Date();
       setText("operation-status", reportSummary(data, data.checks.some((check) => check.verdict === "warn"))[0] + ".");
+      const adapterChanged = !sameAdapters(state.vpnInterfaces, data.vpn_interfaces);
+      const previousIp = detectionIp(state.detection);
       state.vpnInterfaces = data.vpn_interfaces;
-      if (data.exit_ip && state.detection?.profile?.source?.ip && data.exit_ip !== state.detection.profile.source.ip) {
+      if (state.detection && (adapterChanged || (data.exit_ip && previousIp && data.exit_ip !== previousIp))) {
         state.detection = null;
-        notice("The public IP changed since the last location lookup. Detect the exit again to update the map.");
+        notice("The connection changed since the last location lookup. Run Detect exit again to update the map.");
       }
     } else {
       setText("operation-status", "");
