@@ -59,6 +59,8 @@ impl From<Exit> for ExitCode {
 /// Settings shared by every command, derived from global flags.
 #[derive(Debug, Clone)]
 pub struct Ctx {
+    #[cfg(windows)]
+    vpn_lookup: bool,
     /// Emit JSON instead of human output.
     pub json: bool,
     /// Which optional backends are enabled.
@@ -82,6 +84,8 @@ impl Ctx {
         };
         Ok(Self {
             json: cli.json,
+            #[cfg(windows)]
+            vpn_lookup: cli.vpn_lookup,
             backend_opts: BackendOptions { locale: cli.locale, location: cli.location },
             state_path: state_dir.join(STATE_FILE),
             resolve_opts,
@@ -132,6 +136,28 @@ async fn resolve_current_profile(
     )
     .await;
     (public_ip, profile.context("resolving location of the public (VPN exit) IP"))
+}
+
+async fn configured_public_profile(ctx: &Ctx) -> (Option<IpAddr>, Result<Profile>) {
+    let opts = &ctx.resolve_opts;
+    #[cfg(windows)]
+    if ctx.vpn_lookup {
+        use geoveil_platform::windows::vpn_lookup;
+        match tokio::task::spawn_blocking(vpn_lookup::prepare).await {
+            Ok(Ok(Some(lookup))) => {
+                let providers = lookup.providers();
+                let (ip, profile) = profile_for_public_ip(
+                    lookup.public_ip(opts.timeout),
+                    |ip| geo::resolve(&providers, ip, opts),
+                ).await;
+                return (ip, profile.context("looking up the exit through the VPN adapter"));
+            }
+            Ok(Ok(None)) => {}
+            Ok(Err(error)) => return (None, Err(anyhow::anyhow!(error))),
+            Err(error) => return (None, Err(error).context("preparing the VPN lookup")),
+        }
+    }
+    resolve_current_profile(&geo::default_providers(), opts).await
 }
 
 /// Resolve the public IP's location: find the IP first (IPv4 preferred,
@@ -190,8 +216,7 @@ pub async fn detect(ctx: &Ctx) -> Result<Exit> {
         tracing::warn!("no VPN interface detected; the resolved location is probably your real one");
     }
     let classified = classify(ifaces);
-    let providers = geo::default_providers();
-    let (public_ip, resolved) = resolve_current_profile(&providers, &ctx.resolve_opts).await;
+    let (public_ip, resolved) = configured_public_profile(ctx).await;
 
     let (profile, error) = match &resolved {
         Ok(p) => (Some(p), None),
@@ -236,8 +261,10 @@ pub async fn detect(ctx: &Ctx) -> Result<Exit> {
 /// `geoveil apply`.
 pub async fn apply(ctx: &Ctx, args: &ApplyArgs) -> Result<Exit> {
     let request = args.profile_request();
-    let providers = geo::default_providers();
-    let profile = build_profile(&request, &providers, &ctx.resolve_opts).await?;
+    let profile = match request {
+        ProfileRequest::PublicIp => configured_public_profile(ctx).await.1?,
+        _ => build_profile(&request, &geo::default_providers(), &ctx.resolve_opts).await?,
+    };
 
     let _lock = ctx.lock()?;
     let mut orch = ctx.orchestrator()?;

@@ -24,6 +24,7 @@ if (!app.requestSingleInstanceLock()) {
       port: 0,
       binary: app.isPackaged ? join(process.resourcesPath, 'bin', 'geoveil.exe') : undefined,
       capability,
+      vpnLookup: app.isPackaged && process.platform === 'win32',
     });
     if (closing) return;
 

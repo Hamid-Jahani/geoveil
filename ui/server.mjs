@@ -105,14 +105,17 @@ async function runCli(configuredBinary, command, flags = []) {
   return { data, exitCode };
 }
 
-async function runLive(binary, command, options) {
+async function runLive(binary, command, options, vpnLookup) {
+  const lookupFlags = vpnLookup ? ['--vpn-lookup', '--provider-timeout-secs', '10'] : [];
   switch (command) {
+    case 'detect':
+      return runCli(binary, 'detect', lookupFlags);
     case 'apply': {
       const { data } = await runCli(binary, 'status');
       if (!data.vpn_interfaces.length) {
         throw new RequestError(409, 'Connect a VPN that Geoveil recognizes before applying a profile.');
       }
-      const flags = [];
+      const flags = [...lookupFlags];
       if (options.locale) flags.push('--locale');
       if (options.location) flags.push('--location');
       return runCli(binary, 'apply', flags);
@@ -332,7 +335,7 @@ async function handle(req, res, context) {
   const operation = (async () => {
     const result = demo
       ? runDemo(demoSnapshots, route.command, options)
-      : await runLive(binary, route.command, options);
+      : await runLive(binary, route.command, options, context.vpnLookup);
     json(res, 200, result);
   })();
   if (route.mutation) context.mutation = operation;
@@ -345,7 +348,7 @@ async function handle(req, res, context) {
 }
 
 /** Start an isolated dashboard instance. Port zero selects an available loopback port. */
-export async function startDashboard({ port = 4173, demo = false, binary, capability } = {}) {
+export async function startDashboard({ port = 4173, demo = false, binary, capability, vpnLookup = false } = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new RangeError('Dashboard port must be an integer from 0 to 65535.');
   }
@@ -355,6 +358,7 @@ export async function startDashboard({ port = 4173, demo = false, binary, capabi
   const context = {
     demo,
     binary,
+    vpnLookup,
     capability: capability === undefined ? null : Buffer.from(capability),
     token: Buffer.from(randomBytes(32).toString('hex')),
     running: new Set(),

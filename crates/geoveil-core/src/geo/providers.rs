@@ -8,8 +8,9 @@
 
 use super::{first_ok, BoxFuture, GeoError, IpGeoProvider, ProviderAnswer};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::future::Future;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 const USER_AGENT: &str = concat!("geoveil/", env!("CARGO_PKG_VERSION"));
@@ -38,7 +39,10 @@ type UrlFn = fn(Option<IpAddr>) -> String;
 /// The built-in providers: ipwho.is, ipapi.co, ip-api.com and ipinfo.io,
 /// sharing one HTTP client.
 pub fn default_providers() -> Vec<Box<dyn IpGeoProvider>> {
-    let client = build_client(PROVIDER_CLIENT_TIMEOUT, Family::Any, ProxyMode::System);
+    providers_with_client(build_client(PROVIDER_CLIENT_TIMEOUT, Family::Any, ProxyMode::System))
+}
+
+fn providers_with_client(client: Result<reqwest::Client, String>) -> Vec<Box<dyn IpGeoProvider>> {
     let specs: [(&'static str, UrlFn, ParseFn); 4] = [
         (IPWHOIS, ipwhois_url, parse_ipwhois),
         (IPAPI_CO, ipapi_co_url, parse_ipapi_co),
@@ -56,6 +60,48 @@ pub fn default_providers() -> Vec<Box<dyn IpGeoProvider>> {
             }) as Box<dyn IpGeoProvider>
         })
         .collect()
+}
+
+/// All hostnames used for public IP discovery or geolocation.
+pub const LOOKUP_HOSTS: [&str; 7] = [
+    "api.ipify.org", "icanhazip.com", "ifconfig.me",
+    IPWHOIS, IPAPI_CO, IP_API, IPINFO,
+];
+
+/// An IPv4 lookup using addresses already resolved through a VPN adapter.
+pub struct BoundLookup(reqwest::Client);
+
+impl BoundLookup {
+    pub fn new(local: Ipv4Addr, addresses: &BTreeMap<String, Vec<Ipv4Addr>>) -> Result<Self, GeoError> {
+        let mut client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .timeout(PROVIDER_CLIENT_TIMEOUT)
+            .local_address(IpAddr::V4(local))
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none());
+        for host in LOOKUP_HOSTS {
+            let resolved: Vec<_> = addresses.get(host).into_iter().flatten()
+                .map(|ip| SocketAddr::new(IpAddr::V4(*ip), 0))
+                .collect();
+            // An empty override prevents a second lookup via Windows' general resolver.
+            client = client.resolve_to_addrs(host, &resolved);
+        }
+        client.build().map(Self).map_err(|e| GeoError::Http {
+            provider: "VPN lookup".into(),
+            detail: e.to_string(),
+        })
+    }
+
+    pub fn providers(&self) -> Vec<Box<dyn IpGeoProvider>> {
+        providers_with_client(Ok(self.0.clone()))
+    }
+
+    pub async fn public_ip(&self, timeout: Duration) -> Result<IpAddr, GeoError> {
+        query_with_client(&self.0, timeout).await.map_err(|detail| GeoError::Http {
+            provider: "VPN public IP".into(),
+            detail,
+        })
+    }
 }
 
 /// Whether an HTTP client honours proxy settings.
@@ -120,9 +166,13 @@ where
 /// One round: query every endpoint concurrently over `family`.
 async fn query_public_ip(family: Family, timeout: Duration, proxy: ProxyMode) -> Result<IpAddr, String> {
     let client = build_client(timeout, family, proxy)?;
+    query_with_client(&client, timeout).await
+}
+
+async fn query_with_client(client: &reqwest::Client, timeout: Duration) -> Result<IpAddr, String> {
     let futs: Vec<BoxFuture<'_, Result<IpAddr, String>>> = PUBLIC_IP_ENDPOINTS
         .iter()
-        .map(|url| Box::pin(fetch_public_ip(&client, url, timeout)) as BoxFuture<'_, _>)
+        .map(|url| Box::pin(fetch_public_ip(client, url, timeout)) as BoxFuture<'_, _>)
         .collect();
     first_ok(futs).await.map_err(|errors| errors.join("; "))
 }

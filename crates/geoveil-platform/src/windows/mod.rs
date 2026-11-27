@@ -9,6 +9,8 @@
 
 #[cfg(windows)]
 pub mod kill_switch;
+#[cfg(windows)]
+pub mod vpn_lookup;
 mod locale;
 mod timezone;
 

@@ -6,7 +6,7 @@
 
 mod providers;
 
-pub use providers::{default_providers, public_ip, public_ip_direct};
+pub use providers::{default_providers, public_ip, public_ip_direct, BoundLookup, LOOKUP_HOSTS};
 
 use crate::types::{Profile, ProfileSource};
 use std::collections::HashMap;

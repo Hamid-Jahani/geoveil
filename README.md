@@ -144,6 +144,11 @@ The installer is per user and includes the Geoveil CLI and the desktop runtime.
 The app reads local status on launch. It contacts diagnostic providers when you
 run a check, and applies or restores settings only when you confirm the action.
 
+The desktop app uses the active OpenVPN or sing-box adapter's IPv4 DNS and routes
+for public IP and location lookups. The adapter needs a usable IPv4 address and
+a DNS server routed through it. To use the same lookup in the Windows CLI, run
+`geoveil --vpn-lookup detect`.
+
 To build the unsigned installer, install Node.js 22.12 or newer and the Windows
 [Rust build requirements](#requirements). Run this from the repository root in
 PowerShell:

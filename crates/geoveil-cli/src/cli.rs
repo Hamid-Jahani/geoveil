@@ -35,6 +35,11 @@ pub struct Cli {
     #[arg(long, global = true, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=120))]
     pub provider_timeout_secs: u64,
 
+    /// Use the Windows OpenVPN or sing-box adapter for exit lookups when connected.
+    #[cfg(windows)]
+    #[arg(long, global = true)]
+    pub vpn_lookup: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
